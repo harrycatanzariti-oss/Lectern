@@ -86,13 +86,18 @@ STR = {"type": "string"}
 INT = {"type": "integer"}
 SOURCES = _arr(INT, "S-ids of the chunks this draws on")
 
+UNIT = {"type": "string", "description": "The syllabus unit or module this topic belongs to"}
+COVERED = {"type": "boolean", "description": "False if the material doesn't teach this yet (it's only on the syllabus)"}
+
 OUTLINE_SCHEMA = _obj(
     subject_summary=STR,
     topics=_arr(_obj(
+        unit=UNIT,
         title=STR,
         summary={"type": "string", "description": "One or two sentences on what this topic covers"},
         sources=SOURCES,
-    ), "In teaching order: prerequisites first"),
+        covered=COVERED,
+    ), "In teaching order: prerequisites first, each unit's topics together"),
 )
 
 TOPIC_SCHEMA = _obj(
@@ -113,9 +118,11 @@ TOPIC_SCHEMA = _obj(
 UPDATE_SCHEMA = _obj(
     topics=_arr(_obj(
         existing_id={"type": "integer", "description": "id of the existing topic this is, or -1 if new"},
+        unit=UNIT,
         title=STR,
         summary=STR,
         sources=SOURCES,
+        covered=COVERED,
         extend={"type": "boolean", "description": "Existing topic that the new material adds substantial content to"},
     ), "The whole updated course in teaching order"),
 )
@@ -235,14 +242,33 @@ class Tutor:
     def _with_material(material: str, task: str) -> str:
         return f"<material>\n{material}\n</material>\n\n{task}"
 
-    def outline(self, subject: str, material: str) -> dict[str, Any]:
+    @staticmethod
+    def _syllabus_rules(outline_files: list[str]) -> str:
+        """How to group topics into units, and what counts as covered."""
+        if not outline_files:
+            return (
+                "Group the topics into units the way a course outline would (3–10 units, each a "
+                "coherent block such as a chapter or a few weeks of lectures). Every topic is "
+                "covered, since the material is all there is."
+            )
+        return (
+            f"{', '.join(outline_files)} {'is' if len(outline_files) == 1 else 'are'} the official course "
+            "outline. It's the syllabus: use its units/modules (and their names) as the units, and make "
+            "sure every item it says students must learn becomes a topic. Where the rest of the "
+            "material teaches an item, set covered true and cite those sources. Where nothing but the "
+            "outline mentions it, still include it, with covered false and no sources, so the "
+            "student can see the gap. Material the outline doesn't mention goes in the best-fitting unit."
+        )
+
+    def outline(self, subject: str, material: str, outline_files: list[str] = ()) -> dict[str, Any]:
         return self._call(
             prompt=self._with_material(material, (
                 f"Subject: {subject}\n\n"
                 "Plan a course that covers everything in this material. Split it into topics a "
                 "student can learn in 15–30 minutes each (usually 6–30 topics, more for a whole "
                 "textbook). Order them so each topic only relies on earlier ones. Merge material "
-                "that the slides and textbook both cover into the same topic."
+                "that the slides and textbook both cover into the same topic.\n\n"
+                + self._syllabus_rules(list(outline_files))
             )),
             schema=OUTLINE_SCHEMA,
         )
@@ -274,10 +300,15 @@ class Tutor:
         )
 
     def update_outline(
-        self, subject: str, material: str, existing: list[dict], new_files: list[str]
+        self, subject: str, material: str, existing: list[dict], new_files: list[str],
+        outline_files: list[str] = (),
     ) -> dict[str, Any]:
         """Fit newly added files into an existing course without disturbing what's there."""
-        current = "\n".join(f"[id {t['id']}] {t['title']}: {t['summary']}" for t in existing)
+        current = "\n".join(
+            f"[id {t['id']}] ({t.get('unit') or 'no unit yet'}) {t['title']}: {t['summary']}"
+            + (" [not covered by the material yet]" if t.get("status") == "missing" else "")
+            for t in existing
+        )
         return self._call(
             prompt=self._with_material(material, (
                 f"Subject: {subject}\n\nThe student already has this course, in order:\n{current}\n\n"
@@ -288,7 +319,11 @@ class Tutor:
                 "- Where the new material adds substantial content to an existing topic, set extend "
                 "to true and list the new sources. Otherwise false.\n"
                 "- Add new topics (existing_id -1, extend false) for anything not yet covered, "
-                "each 15–30 minutes of learning, placed after their prerequisites."
+                "each 15–30 minutes of learning, placed after their prerequisites.\n"
+                "- Give every topic a unit, keeping existing topics in their unit unless it has none.\n"
+                "- A topic marked not covered becomes covered (true, with sources) once the material "
+                "teaches it.\n\n"
+                + self._syllabus_rules(list(outline_files))
             )),
             schema=UPDATE_SCHEMA,
         )

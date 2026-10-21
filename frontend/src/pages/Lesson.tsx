@@ -42,7 +42,9 @@ export default function Lesson() {
         <Link to={`/s/${topic.subject_id}`} className="text-sm text-neutral-500 hover:underline">
           ← Course path
         </Link>
-        <p className="mt-3 text-sm font-medium text-brand-deep">Topic {topic.position + 1}</p>
+        <p className="mt-3 text-sm font-medium text-brand-deep">
+          {topic.unit ? `${topic.unit} · ` : ""}Topic {topic.position + 1}
+        </p>
         <h1 className="text-3xl font-bold">{topic.title}</h1>
         <p className="mt-2 text-neutral-500">{topic.summary}</p>
       </div>

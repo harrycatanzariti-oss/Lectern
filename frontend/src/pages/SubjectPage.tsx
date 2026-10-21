@@ -1,14 +1,16 @@
-import { AlertTriangle, ArrowRight, Check, ClipboardList, Download, FileText, Layers, MessageCircle, PenLine, RefreshCw, Trash2, Upload } from "lucide-react";
+import { AlertTriangle, ArrowRight, ClipboardList, Download, FileText, Layers, MessageCircle, PenLine, RefreshCw, Trash2, Upload } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { StatTiles, Syllabus } from "../components/Syllabus";
 import { TutorChat } from "../components/TutorChat";
-import { Bar, ErrorNote, Spinner, btnGhost, btnPrimary, card, masteryLabel } from "../components/ui";
-import { MASTERED, api, type Subject } from "../lib/api";
+import { Bar, ErrorNote, Spinner, btnGhost, btnPrimary, card } from "../components/ui";
+import { api, type Subject } from "../lib/api";
 
 const KINDS = [
   { value: "slides", label: "Lecture slides" },
   { value: "textbook", label: "Textbook" },
   { value: "notes", label: "Notes" },
+  { value: "outline", label: "Course outline" },
 ];
 
 function Uploader({ subject, onUploaded }: { subject: Subject; onUploaded: () => void }) {
@@ -80,6 +82,12 @@ function Uploader({ subject, onUploaded }: { subject: Subject; onUploaded: () =>
           e.target.value = "";
         }}
       />
+      {kind === "outline" && (
+        <p className="text-sm text-neutral-500">
+          Your unit outline or official syllabus. The course follows its units, and anything it lists that your other files
+          don't cover shows up as a gap.
+        </p>
+      )}
       {errors.map((e) => (
         <ErrorNote key={e} error={e} />
       ))}
@@ -177,9 +185,7 @@ export default function SubjectPage() {
   if (error) return <ErrorNote error={error} />;
   if (!subject) return <Spinner />;
 
-  const ready = subject.topics.filter((t) => t.status === "ready");
-  const mastered = ready.filter((t) => t.mastery >= MASTERED).length;
-  const hasCourse = ready.length > 0;
+  const hasCourse = subject.topics.some((t) => t.status === "ready");
   const filesOpen = showFiles || !hasCourse || subject.stale;
 
   const remove = async () => {
@@ -211,11 +217,7 @@ export default function SubjectPage() {
             <span className="h-4 w-4 rounded-full" style={{ background: subject.color }} />
             {subject.name}
           </h1>
-          {hasCourse && (
-            <p className="mt-1 text-neutral-500">
-              {mastered} of {ready.length} topics mastered
-            </p>
-          )}
+
         </div>
         {hasCourse && (
           <div className="flex flex-wrap gap-2">
@@ -235,6 +237,8 @@ export default function SubjectPage() {
         )}
       </div>
 
+      {hasCourse && <StatTiles subject={subject} />}
+
       {hasCourse && subject.next && (
         <button onClick={goNext} className={`${card} flex w-full items-center justify-between gap-4 border-brand-200 bg-brand-50 p-5 text-left`}>
           <div>
@@ -251,49 +255,7 @@ export default function SubjectPage() {
         </div>
       )}
 
-      {hasCourse && (
-        <section>
-          <h2 className="mb-3 font-semibold">Course path</h2>
-          <ol className={`${card} divide-y divide-neutral-200 overflow-hidden`}>
-            {subject.topics.map((t, i) => {
-              const started = t.lesson_done || t.attempted > 0 || t.cards > 0;
-              const done = t.mastery >= MASTERED;
-              return (
-                <li key={t.id}>
-                  {t.status === "ready" ? (
-                    <Link to={`/t/${t.id}`} className="flex items-center gap-4 p-4 hover:bg-neutral-50">
-                      <span
-                        className={`grid h-8 w-8 shrink-0 place-items-center rounded-full text-sm font-semibold ${done ? "text-[#fff]" : "bg-neutral-100 text-neutral-600"}`}
-                        style={done ? { background: subject.color } : undefined}
-                      >
-                        {done ? <Check size={16} /> : i + 1}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="font-medium">{t.title}</p>
-                        <p className="truncate text-sm text-neutral-500">{t.summary}</p>
-                        <div className="mt-2 flex items-center gap-3">
-                          <div className="w-32">
-                            <Bar value={t.mastery} color={subject.color} />
-                          </div>
-                          <span className="text-xs text-neutral-500">{masteryLabel(t.mastery, started)}</span>
-                        </div>
-                      </div>
-                    </Link>
-                  ) : (
-                    <div className="flex items-center gap-4 p-4 text-neutral-500">
-                      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-neutral-100 text-sm">{i + 1}</span>
-                      <div>
-                        <p className="font-medium">{t.title}</p>
-                        <p className="text-sm">{t.status === "failed" ? "Couldn't be written. Rebuild to retry." : "Being written…"}</p>
-                      </div>
-                    </div>
-                  )}
-                </li>
-              );
-            })}
-          </ol>
-        </section>
-      )}
+      {subject.topics.length > 0 && <Syllabus subject={subject} />}
 
       <section className={`${card} space-y-5 p-5`}>
         <div className="flex items-center justify-between">

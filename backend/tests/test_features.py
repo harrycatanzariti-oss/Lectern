@@ -205,7 +205,8 @@ def test_export_for_claude_project(client):
     assert r.headers["content-disposition"] == 'attachment; filename="math1131-calculus.md"'
     md = r.text
     assert md.startswith("# MATH1131 Calculus: study pack")
-    assert "| 1 | Limits (weak) | " in md and "| 2 | Derivatives | 0% | no | 0/3 |" in md
+    assert "| 1 | Unit 1: Calculus | Limits (weak) | " in md
+    assert "| 2 | Unit 1: Calculus | Derivatives | 0% | no | 0/3 |" in md
     assert "Recent wrong or partly-right answers" in md
     assert "### 1. Limits" in md and "- Q: Limits Q0?\n  A: A0" in md
     assert "*Answer:* C. c" in md
@@ -231,3 +232,63 @@ def test_unreadable_image_pages_dont_fail_the_build(client):
     assert s["build_status"] == "built"
     d = s["documents"][0]
     assert d["image_pages"] == [] and "images not supported" in d["warning"] and d["id"] == doc["id"]
+
+
+def outline_upload(client, sid, text="Unit 1: limits, derivatives. Unit 2: Taylor series."):
+    return client.post(f"/api/subjects/{sid}/documents", data={"kind": "outline"},
+                       files=[("files", ("syllabus.md", text.encode(), "text/markdown"))])
+
+
+def test_dashboard_groups_topics_into_units(client):
+    sid = make_subject(client)
+    upload(client, sid)
+    build(client, sid)
+    s = client.get(f"/api/subjects/{sid}").json()
+    assert [u["title"] for u in s["units"]] == ["Unit 1: Calculus"]
+    assert s["units"][0]["topic_ids"] == [t["id"] for t in s["topics"]]
+    assert s["progress"] == {"mastery": 0.0, "topics": 2, "mastered": 0, "covered": 2, "missing": 0,
+                             "lessons_read": 0}
+
+
+def test_course_outline_shows_gaps_then_fills_them(client):
+    sid = make_subject(client)
+    upload(client, sid)
+    assert outline_upload(client, sid).status_code == 201
+    build(client, sid)
+    assert client.fake.outline_files == ["syllabus.md"]
+
+    s = client.get(f"/api/subjects/{sid}").json()
+    gap = s["topics"][2]
+    assert (gap["title"], gap["status"], gap["unit"]) == ("Taylor series", "missing", "Unit 2: Series")
+    assert [u["title"] for u in s["units"]] == ["Unit 1: Calculus", "Unit 2: Series"]
+    assert s["units"][1]["missing"] == 1 and s["progress"]["covered"] == 2 and s["progress"]["missing"] == 1
+    assert "1 syllabus item not in your material yet" in s["build_message"]
+    with db.tx() as conn:  # nothing was written for the gap
+        assert conn.execute("SELECT COUNT(*) FROM cards WHERE topic_id=?", (gap["id"],)).fetchone()[0] == 0
+    assert gap["id"] not in [q["topic_id"] for q in client.get(f"/api/subjects/{sid}/exam?n=40").json()["questions"]]
+    assert client.get("/api/subjects").json()[0]["missing"] == 1
+
+    # New material arrives that covers the gap.
+    client.fake.fill_gaps = True
+    upload(client, sid, "Taylor series approximate functions with polynomials.")
+    builder.build(sid, client.fake, fresh=False)
+    assert [t["status"] for t in client.fake.update_existing] == ["ready", "ready", "missing"]
+    s = client.get(f"/api/subjects/{sid}").json()
+    filled = next(t for t in s["topics"] if t["id"] == gap["id"])
+    assert filled["status"] == "ready" and filled["unit"] == "Unit 2: Series"  # unit kept
+    assert s["progress"]["missing"] == 0
+    with db.tx() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM cards WHERE topic_id=?", (gap["id"],)).fetchone()[0] == 3
+
+
+def test_old_topics_without_units_get_one_on_update(client):
+    sid = make_subject(client)
+    upload(client, sid)
+    build(client, sid)
+    with db.tx() as conn:
+        conn.execute("UPDATE topics SET unit='' WHERE subject_id=?", (sid,))
+    assert [u["title"] for u in client.get(f"/api/subjects/{sid}").json()["units"]] == ["Course"]
+    upload(client, sid, "More.")
+    builder.build(sid, client.fake, fresh=False)
+    units = [u["title"] for u in client.get(f"/api/subjects/{sid}").json()["units"]]
+    assert units == ["renamed unit?", "Unit 3: Integration"]

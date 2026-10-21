@@ -56,6 +56,22 @@ Upload it to a Project's knowledge on claude.ai. Instructions at the top of the 
 Claude to tutor from it. Export again to refresh it. Claude Projects have no public API
 for adding files, so this step is manual.
 
+### The subject dashboard
+
+Each subject opens on a dashboard:
+
+- **Stat tiles:** overall progress, topics mastered, cards due today, and how much of the
+  syllabus your files cover.
+- **Up next:** the one thing to do now.
+- **Syllabus:** units in course order. Each unit has a progress bar, and each topic in it
+  has its own bar plus lesson / flashcards / practice status.
+
+Upload your unit outline or official syllabus as a **Course outline** file, and the units
+follow it. Anything it lists that your other files don't teach appears as a greyed-out
+topic marked *Not in your material yet*. Gaps count as 0% in the progress bars, because
+they're still things you need to know. Add material that covers a gap and **Update
+course** fills it in.
+
 ### Adding material later
 
 Upload the next week's slides and click **Update course**. The AI fits the new material

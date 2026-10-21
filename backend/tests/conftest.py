@@ -16,12 +16,19 @@ class FakeTutor:
     def __init__(self):
         self.topic_calls = []
 
-    def outline(self, subject, material):
+    def outline(self, subject, material, outline_files=()):
         ids = [int(part.split("]")[0]) for part in material.split("[S")[1:]]
-        return {"subject_summary": subject, "topics": [
-            {"title": "Limits", "summary": "What a limit is", "sources": ids[:1] + [99999]},
-            {"title": "Derivatives", "summary": "Rates of change", "sources": ids[1:2]},
-        ]}
+        self.outline_files = list(outline_files)
+        topics = [
+            {"unit": "Unit 1: Calculus", "title": "Limits", "summary": "What a limit is",
+             "sources": ids[:1] + [99999], "covered": True},
+            {"unit": "Unit 1: Calculus", "title": "Derivatives", "summary": "Rates of change",
+             "sources": ids[1:2], "covered": True},
+        ]
+        if outline_files:  # the syllabus lists something the material doesn't teach
+            topics.append({"unit": "Unit 2: Series", "title": "Taylor series", "summary": "Approximating functions",
+                           "sources": [], "covered": False})
+        return {"subject_summary": subject, "topics": topics}
 
     def topic(self, subject, material, outline, index):
         self.topic_calls.append(index)
@@ -44,14 +51,24 @@ class FakeTutor:
             ],
         }
 
-    def update_outline(self, subject, material, existing, new_files):
+    def update_outline(self, subject, material, existing, new_files, outline_files=()):
         self.update_calls = getattr(self, "update_calls", 0) + 1
+        self.update_existing = existing
         ids = [int(part.split("]")[0]) for part in material.split("[S")[1:]]
-        kept = [{"existing_id": t["id"], "title": "renamed?", "summary": "", "sources": ids[-1:], "extend": i == 0}
-                for i, t in enumerate(existing) if t["id"] not in self.drop]
+        kept = []
+        for i, t in enumerate(existing):
+            if t["id"] in self.drop:
+                continue
+            gap = t["status"] == "missing"
+            kept.append({"existing_id": t["id"], "unit": "renamed unit?", "title": "renamed?", "summary": "",
+                         "sources": ids[-1:] if (gap and self.fill_gaps) or not gap else [],
+                         "covered": self.fill_gaps if gap else True, "extend": i == 0})
         return {"topics": kept + [
-            {"existing_id": -1, "title": "Integrals", "summary": "Areas", "sources": ids[-1:], "extend": False},
+            {"existing_id": -1, "unit": "Unit 3: Integration", "title": "Integrals", "summary": "Areas",
+             "sources": ids[-1:], "covered": True, "extend": False},
         ]}
+
+    fill_gaps = False
 
     drop: set = set()
 

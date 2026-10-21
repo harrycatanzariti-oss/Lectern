@@ -167,13 +167,17 @@ def list_subjects():
         subjects = db.rows(conn.execute("SELECT * FROM subjects ORDER BY created_at DESC, id DESC"))
         due = _due_counts(conn)
         for s in subjects:
-            topics = [r["id"] for r in conn.execute(
-                "SELECT id FROM topics WHERE subject_id=? AND status='ready'", (s["id"],)
-            )]
-            m = topic_mastery(conn, topics)
-            s["topics"] = len(topics)
-            s["mastered"] = sum(1 for v in m.values() if v["mastery"] >= MASTERED)
-            s["mastery"] = round(sum(v["mastery"] for v in m.values()) / len(m), 3) if m else 0.0
+            # Same measure as the subject's dashboard: syllabus gaps count as not learned.
+            topics = db.rows(conn.execute(
+                "SELECT id, status, lesson_done FROM topics WHERE subject_id=? AND status IN ('ready', 'missing')",
+                (s["id"],),
+            ))
+            m = topic_mastery(conn, [t["id"] for t in topics])
+            p = _progress([{**t, **m[t["id"]]} for t in topics])
+            s["topics"] = p["topics"]
+            s["mastered"] = p["mastered"]
+            s["mastery"] = p["mastery"]
+            s["missing"] = p["missing"]
             s["documents"] = conn.execute(
                 "SELECT COUNT(*) FROM documents WHERE subject_id=?", (s["id"],)
             ).fetchone()[0]
@@ -218,7 +222,7 @@ def get_subject(subject_id: int):
             "SELECT * FROM documents WHERE subject_id=? ORDER BY id", (subject_id,)
         ))
         topics = db.rows(conn.execute(
-            "SELECT id, position, title, summary, sources, status, lesson_done FROM topics "
+            "SELECT id, position, unit, title, summary, sources, status, lesson_done FROM topics "
             "WHERE subject_id=? ORDER BY position", (subject_id,)
         ))
         m = topic_mastery(conn, [t["id"] for t in topics])
@@ -226,6 +230,8 @@ def get_subject(subject_id: int):
             t.update(m[t["id"]])
             t["lesson_done"] = bool(t["lesson_done"])
         s["topics"] = topics
+        s["units"] = syllabus(topics)
+        s["progress"] = _progress(topics)
         s.update(_due_counts(conn, subject_id).get(subject_id, {"due": 0, "new": 0}))
         s["next"] = _next_step(topics, s["due"])
         # Files uploaded since the course was built aren't in it yet.
@@ -234,6 +240,28 @@ def get_subject(subject_id: int):
         ).fetchone()[0] > 0
         s["failed_topics"] = sum(1 for t in topics if t["status"] == "failed")
     return s
+
+
+def _progress(topics: list[dict]) -> dict:
+    """Progress through a set of topics. Syllabus items with no material count as not
+    learned: the bar shows how much of what you need to know you actually know."""
+    taught = [t for t in topics if t["status"] != "missing"]
+    return {
+        "mastery": round(sum(t["mastery"] for t in topics) / len(topics), 3) if topics else 0.0,
+        "topics": len(topics),
+        "mastered": sum(1 for t in topics if t["mastery"] >= MASTERED),
+        "covered": len(taught),
+        "missing": len(topics) - len(taught),
+        "lessons_read": sum(1 for t in topics if t["lesson_done"]),
+    }
+
+
+def syllabus(topics: list[dict]) -> list[dict]:
+    """Topics grouped by unit, in course order, each unit with its progress."""
+    units: dict[str, list[dict]] = {}
+    for t in topics:
+        units.setdefault(t["unit"] or "Course", []).append(t)
+    return [{"title": name, "topic_ids": [t["id"] for t in ts], **_progress(ts)} for name, ts in units.items()]
 
 
 def _next_step(topics: list[dict], due: int) -> dict | None:
@@ -253,8 +281,8 @@ def _next_step(topics: list[dict], due: int) -> dict | None:
 
 @app.post("/api/subjects/{subject_id}/documents", status_code=201)
 async def upload(subject_id: int, files: list[UploadFile] = File(...), kind: str = Form("slides")):
-    if kind not in ("slides", "textbook", "notes"):
-        raise HTTPException(422, "kind must be slides, textbook or notes")
+    if kind not in ("slides", "textbook", "notes", "outline"):
+        raise HTTPException(422, "kind must be slides, textbook, notes or outline")
     with db.tx() as conn:
         _get(conn, "SELECT id FROM subjects WHERE id=?", subject_id)
     added, errors = [], []
@@ -665,6 +693,10 @@ def export(subject_id: int, material: bool = False):
         topics = db.rows(conn.execute(
             "SELECT * FROM topics WHERE subject_id=? AND status='ready' ORDER BY position", (subject_id,)
         ))
+        gaps = db.rows(conn.execute(
+            "SELECT unit, title, summary FROM topics WHERE subject_id=? AND status='missing' ORDER BY position",
+            (subject_id,),
+        ))
         mastery = topic_mastery(conn, [t["id"] for t in topics])
         cards = db.rows(conn.execute(
             "SELECT topic_id, front, back, reps, lapses, due_at FROM cards WHERE subject_id=? ORDER BY id", (subject_id,)
@@ -696,16 +728,20 @@ def export(subject_id: int, material: bool = False):
         "",
         "## Progress",
         "",
-        "| # | Topic | Mastery | Lesson read | Practice answered |",
-        "|---|---|---|---|---|",
+        "| # | Unit | Topic | Mastery | Lesson read | Practice answered |",
+        "|---|---|---|---|---|---|",
     ]
     for t in topics:
         m = mastery[t["id"]]
         flag = " (weak)" if (t["lesson_done"] or m["attempted"]) and m["mastery"] < 0.5 else ""
         out.append(
-            f"| {t['position'] + 1} | {t['title']}{flag} | {round(m['mastery'] * 100)}% | "
+            f"| {t['position'] + 1} | {t['unit']} | {t['title']}{flag} | {round(m['mastery'] * 100)}% | "
             f"{'yes' if t['lesson_done'] else 'no'} | {m['attempted']}/{m['questions']} |"
         )
+    if gaps:
+        out += ["", "**On the syllabus but not in their material yet** (teach these from general knowledge "
+                "and say so):", ""]
+        out += [f"- {g['unit']}: {g['title']} ({g['summary']})" for g in gaps]
     hard = [c for c in cards if c["lapses"] >= 2]
     if hard:
         out += ["", "**Flashcards they keep forgetting:**", ""]

@@ -13,12 +13,13 @@ export interface SubjectSummary {
   documents: number;
   due: number;
   new: number;
+  missing: number;
 }
 
 export interface Doc {
   id: number;
   filename: string;
-  kind: "slides" | "textbook" | "notes";
+  kind: "slides" | "textbook" | "notes" | "outline";
   units: number;
   chars: number;
   warning: string;
@@ -37,11 +38,27 @@ export interface Mastery {
 export interface TopicRow extends Mastery {
   id: number;
   position: number;
+  unit: string;
   title: string;
   summary: string;
   sources: string[];
-  status: "pending" | "ready" | "failed";
+  /** missing: on the syllabus, but nothing in the material teaches it yet */
+  status: "pending" | "ready" | "failed" | "missing";
   lesson_done: boolean;
+}
+
+export interface Progress {
+  mastery: number;
+  topics: number;
+  mastered: number;
+  covered: number;
+  missing: number;
+  lessons_read: number;
+}
+
+export interface Unit extends Progress {
+  title: string;
+  topic_ids: number[];
 }
 
 export interface NextStep {
@@ -65,6 +82,8 @@ export interface Subject {
   next: NextStep | null;
   stale: boolean;
   failed_topics: number;
+  units: Unit[];
+  progress: Progress;
 }
 
 export interface Topic extends TopicRow {

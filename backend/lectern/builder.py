@@ -132,16 +132,38 @@ def build(subject_id: int, tutor: Tutor, fresh: bool = True) -> None:
     subject, material, labels = _load_material(subject_id)
     with db.tx() as conn:
         has_course = conn.execute("SELECT COUNT(*) FROM topics WHERE subject_id=?", (subject_id,)).fetchone()[0]
+        # Official course outlines: the syllabus every topic is measured against.
+        outline_files = [r[0] for r in conn.execute(
+            "SELECT filename FROM documents WHERE subject_id=? AND kind='outline' ORDER BY id", (subject_id,)
+        )]
     if fresh or not has_course:
-        _fresh(subject, material, labels, tutor)
+        _fresh(subject, material, labels, tutor, outline_files)
     else:
-        _update(subject, material, labels, tutor)
+        _update(subject, material, labels, tutor, outline_files)
 
 
-def _fresh(subject: dict, material: str, labels: dict[int, str], tutor: Tutor) -> None:
+def _covered(t: dict) -> bool:
+    """A syllabus item counts as covered only if the material is actually cited for it."""
+    return bool(t["covered"] and t["sources"])
+
+
+def _summary(written: int, added: int = 0, extended: int = 0, gaps: int = 0) -> str | None:
+    parts = []
+    if added:
+        parts.append(f"{added} new topic{'s' * (added != 1)}")
+    if extended:
+        parts.append(f"{extended} topic{'s' * (extended != 1)} extended")
+    if not parts and written:
+        parts.append(f"{written} topic{'s' * (written != 1)} written")
+    if gaps:
+        parts.append(f"{gaps} syllabus item{'s' * (gaps != 1)} not in your material yet")
+    return ", ".join(parts) or None
+
+
+def _fresh(subject: dict, material: str, labels: dict[int, str], tutor: Tutor, outline_files: list[str]) -> None:
     subject_id = subject["id"]
     _status(subject_id, "building", "Planning the course", 0.03)
-    outline = tutor.outline(subject["name"], material)["topics"]
+    outline = tutor.outline(subject["name"], material, outline_files)["topics"]
     if not outline:
         raise AIError("The AI couldn't find any topics in this material.")
     for t in outline:
@@ -152,24 +174,27 @@ def _fresh(subject: dict, material: str, labels: dict[int, str], tutor: Tutor) -
         conn.execute("DELETE FROM topics WHERE subject_id=?", (subject_id,))
         topic_ids = [
             conn.execute(
-                "INSERT INTO topics (subject_id, position, title, summary, sources) VALUES (?,?,?,?,?)",
-                (subject_id, i, t["title"], t["summary"], json.dumps([labels[s] for s in t["sources"]])),
+                "INSERT INTO topics (subject_id, position, unit, title, summary, sources, status) VALUES (?,?,?,?,?,?,?)",
+                (subject_id, i, t["unit"].strip(), t["title"], t["summary"],
+                 json.dumps([labels[s] for s in t["sources"]]), "pending" if _covered(t) else "missing"),
             ).lastrowid
             for i, t in enumerate(outline)
         ]
 
+    # Syllabus items with no material are listed, not written: there's nothing to teach from.
     jobs = [
         (topic_ids[i], lambda i=i: tutor.topic(subject["name"], material, outline, i))
-        for i in range(len(outline))
+        for i, t in enumerate(outline) if _covered(t)
     ]
-    _write_all(subject_id, jobs, labels, total=len(outline))
+    gaps = len(outline) - len(jobs)
+    _write_all(subject_id, jobs, labels, total=len(jobs), done_message=_summary(len(jobs), gaps=gaps))
 
 
-def _update(subject: dict, material: str, labels: dict[int, str], tutor: Tutor) -> None:
+def _update(subject: dict, material: str, labels: dict[int, str], tutor: Tutor, outline_files: list[str]) -> None:
     subject_id = subject["id"]
     with db.tx() as conn:
         existing = db.rows(conn.execute(
-            "SELECT id, title, summary, status, sources FROM topics WHERE subject_id=? ORDER BY position",
+            "SELECT id, unit, title, summary, status, sources FROM topics WHERE subject_id=? ORDER BY position",
             (subject_id,),
         ))
         new_files = [r[0] for r in conn.execute(
@@ -177,14 +202,15 @@ def _update(subject: dict, material: str, labels: dict[int, str], tutor: Tutor) 
         )]
     by_id = {t["id"]: t for t in existing}
 
+    def as_planned(t: dict) -> dict:
+        return {"existing_id": t["id"], "unit": t["unit"], "title": t["title"], "summary": t["summary"],
+                "sources": [], "covered": t["status"] != "missing", "extend": False}
+
     if new_files:
         _status(subject_id, "building", "Fitting your new files into the course", 0.03)
-        planned = tutor.update_outline(subject["name"], material, existing, new_files)["topics"]
+        planned = tutor.update_outline(subject["name"], material, existing, new_files, outline_files)["topics"]
     else:
-        planned = [
-            {"existing_id": t["id"], "title": t["title"], "summary": t["summary"], "sources": [], "extend": False}
-            for t in existing
-        ]
+        planned = [as_planned(t) for t in existing]
 
     # The AI must keep every existing topic; put back any it dropped, after its old neighbour.
     seen: set[int] = set()
@@ -194,44 +220,56 @@ def _update(subject: dict, material: str, labels: dict[int, str], tutor: Tutor) 
         eid = t["existing_id"]
         if eid in by_id and eid not in seen:
             seen.add(eid)
-            course.append({**t, "id": eid, "title": by_id[eid]["title"], "summary": by_id[eid]["summary"]})
+            old = by_id[eid]
+            course.append({**t, "id": eid, "title": old["title"], "summary": old["summary"],
+                           "unit": old["unit"] or t["unit"].strip()})  # a topic keeps its unit once it has one
         elif eid not in by_id:
-            course.append({**t, "id": None, "extend": False})
+            course.append({**t, "id": None, "unit": t["unit"].strip(), "extend": False})
     for i, t in enumerate(existing):
         if t["id"] not in seen:
             after = next((j for j, c in enumerate(course) if i and c["id"] == existing[i - 1]["id"]), -1)
-            course.insert(after + 1, {"id": t["id"], "title": t["title"], "summary": t["summary"],
-                                      "sources": [], "extend": False})
+            course.insert(after + 1, {**as_planned(t), "id": t["id"], "covered": False})
 
     with db.tx() as conn:
         for pos, t in enumerate(course):
             if t["id"] is None:
                 t["id"] = conn.execute(
-                    "INSERT INTO topics (subject_id, position, title, summary, sources) VALUES (?,?,?,?,?)",
-                    (subject_id, pos, t["title"], t["summary"], json.dumps([labels[s] for s in t["sources"]])),
+                    "INSERT INTO topics (subject_id, position, unit, title, summary, sources, status) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (subject_id, pos, t["unit"], t["title"], t["summary"],
+                     json.dumps([labels[s] for s in t["sources"]]), "pending" if _covered(t) else "missing"),
                 ).lastrowid
                 t["new"] = True
             else:
-                conn.execute("UPDATE topics SET position=? WHERE id=?", (pos, t["id"]))
+                conn.execute("UPDATE topics SET position=?, unit=? WHERE id=?", (pos, t["unit"], t["id"]))
+                if by_id[t["id"]]["status"] == "missing" and _covered(t):
+                    conn.execute("UPDATE topics SET sources=? WHERE id=?",
+                                 (json.dumps([labels[s] for s in t["sources"]]), t["id"]))
 
     outline = [{"title": t["title"], "summary": t["summary"], "sources": t["sources"]} for t in course]
     jobs: list[tuple[int, Callable[[], dict]]] = []
+    added = extended = filled = 0
     for i, t in enumerate(course):
-        if t.get("new") or by_id.get(t["id"], {}).get("status") == "failed":
-            jobs.append((t["id"], lambda i=i: tutor.topic(subject["name"], material, outline, i)))
-        elif t["extend"] and t["sources"]:
+        status = "new" if t.get("new") else by_id[t["id"]]["status"]
+        write = lambda i=i: tutor.topic(subject["name"], material, outline, i)  # noqa: E731
+        if status == "new" and _covered(t):
+            jobs.append((t["id"], write))
+            added += 1
+        elif status == "failed":
+            jobs.append((t["id"], write))
+        elif status == "missing" and _covered(t):
+            jobs.append((t["id"], write))  # a syllabus gap the new material now fills
+            filled += 1
+        elif status == "ready" and t["extend"] and t["sources"]:
             jobs.append((t["id"], lambda t=t: tutor.extend_topic(
                 subject["name"], material, t, t["sources"], _have(t["id"])
             )))
-    if not jobs:
-        _finish(subject_id, "Course is up to date")
-        return
-    added = sum(1 for t in course if t.get("new"))
-    extended = sum(1 for t in course if t["extend"] and t["sources"] and not t.get("new")
-                   and by_id[t["id"]]["status"] != "failed")
-    parts = [f"{n} {word}" for n, word in ((added, "new topic" + "s" * (added != 1)),
-                                           (extended, "topic" + "s" * (extended != 1) + " extended")) if n]
-    _write_all(subject_id, jobs, labels, total=len(jobs), done_message=", ".join(parts) or None)
+            extended += 1
+    with db.tx() as conn:
+        gaps = conn.execute("SELECT COUNT(*) FROM topics WHERE subject_id=? AND status='missing'",
+                            (subject_id,)).fetchone()[0] - filled
+    _write_all(subject_id, jobs, labels, total=len(jobs),
+               done_message=_summary(len(jobs), added + filled, extended, gaps) or "Course is up to date")
 
 
 def _have(topic_id: int) -> dict[str, list[str]]:
@@ -272,6 +310,9 @@ def _write_all(
             done += 1
             _status(subject_id, "building", f"Wrote {done} of {total} topics", 0.05 + 0.95 * done / total)
 
+    if not jobs:
+        _finish(subject_id, done_message or "Course is up to date")
+        return
     # The first call puts the material in DeepSeek's prefix cache; the rest read from it.
     write(jobs[0])
     with ThreadPoolExecutor(PARALLEL_TOPICS) as pool:

@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS documents (
     id INTEGER PRIMARY KEY,
     subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
     filename TEXT NOT NULL,
-    kind TEXT NOT NULL,              -- slides | textbook | notes
+    kind TEXT NOT NULL,              -- slides | textbook | notes | outline (the official syllabus)
     units INTEGER NOT NULL DEFAULT 0, -- pages or slides with text
     chars INTEGER NOT NULL DEFAULT 0,
     warning TEXT NOT NULL DEFAULT '',
@@ -46,12 +46,13 @@ CREATE TABLE IF NOT EXISTS topics (
     id INTEGER PRIMARY KEY,
     subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
     position INTEGER NOT NULL,
+    unit TEXT NOT NULL DEFAULT '',            -- the syllabus unit/module this topic belongs to
     title TEXT NOT NULL,
     summary TEXT NOT NULL,
     lesson_md TEXT NOT NULL DEFAULT '',
     key_points TEXT NOT NULL DEFAULT '[]',
     sources TEXT NOT NULL DEFAULT '[]',
-    status TEXT NOT NULL DEFAULT 'pending',  -- pending | ready | failed
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | ready | failed | missing (on the syllabus, no material yet)
     lesson_done INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS cards (
@@ -112,9 +113,26 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves an existing
+# table alone, so databases made before a column existed get it added here.
+ADDED_COLUMNS = [
+    ("documents", "image_pages", "TEXT NOT NULL DEFAULT '[]'"),
+    ("documents", "in_course", "INTEGER NOT NULL DEFAULT 1"),  # existing files were already built in
+    ("topics", "unit", "TEXT NOT NULL DEFAULT ''"),
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, decl in ADDED_COLUMNS:
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init() -> None:
     with tx() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         # A build can't survive a restart; don't leave subjects stuck on "building".
         conn.execute(
             "UPDATE subjects SET build_status='failed', build_message='Interrupted by a restart. Build again.' "
