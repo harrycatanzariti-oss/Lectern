@@ -24,7 +24,7 @@ function Setup({ subject, onStart }: { subject: Subject; onStart: (n: number, mi
         </Link>
         <h1 className="mt-1 text-2xl font-bold">Mock exam</h1>
         <p className="mt-1 text-neutral-500">
-          Mixed questions across the course, no hints, marked at the end. Short answers are marked by Claude.
+          Mixed questions across the course, no hints, marked at the end. Short answers are marked by the AI tutor.
         </p>
       </div>
       <div className={`${card} space-y-5 p-5`}>

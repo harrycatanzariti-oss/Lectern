@@ -139,7 +139,7 @@ export default function Practice() {
             onChange={(e) => setText(e.target.value)}
             disabled={!!result}
             rows={6}
-            placeholder="Write your answer and working. Claude marks it against the model answer."
+            placeholder="Write your answer and working. The AI tutor marks it against the model answer."
             className="w-full rounded-xl border border-neutral-300 bg-white p-3 outline-none focus:border-brand"
           />
         )}

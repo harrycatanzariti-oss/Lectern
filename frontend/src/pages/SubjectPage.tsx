@@ -109,7 +109,7 @@ function BuildPanel({ subject, onStarted }: { subject: Subject; onStarted: () =>
         <Spinner label={subject.build_message || "Building…"} />
         <Bar value={subject.build_progress} />
         <p className="text-sm text-neutral-500">
-          Claude is reading everything and writing lessons, flashcards and questions. This takes a few minutes; you can leave this page.
+          The AI is reading everything and writing lessons, flashcards and questions. This takes a few minutes; you can leave this page.
         </p>
       </div>
     );
