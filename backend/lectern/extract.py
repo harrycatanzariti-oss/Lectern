@@ -10,7 +10,7 @@ SUPPORTED = (".pdf", ".pptx", ".txt", ".md")
 # Plain-text files have no pages, so split them into page-sized pieces.
 TEXT_PAGE_CHARS = 3000
 # A PDF page with less text than this is mostly a picture (a scan, a diagram, a slide
-# exported as an image), so Claude reads the page image during the build instead.
+# exported as an image), so the AI reads the page image during the build instead.
 IMAGE_PAGE_CHARS = 40
 
 
@@ -24,7 +24,7 @@ class Chunk:
 @dataclass
 class Extracted:
     chunks: list[Chunk]
-    image_pages: list[int] = field(default_factory=list)  # 1-based PDF pages for Claude to read
+    image_pages: list[int] = field(default_factory=list)  # 1-based PDF pages for the AI to read
 
 
 class UnsupportedFile(ValueError):
@@ -70,17 +70,23 @@ def _pdf(filename: str, data: bytes) -> Extracted:
     return out
 
 
-def pdf_pages(data: bytes, pages: list[int]) -> bytes:
-    """A new PDF holding just these 1-based pages, to send to Claude."""
-    from pypdf import PdfReader, PdfWriter
+def render_pages(data: bytes, pages: list[int], width: int = 1400) -> list[bytes]:
+    """PNG images of these 1-based PDF pages, about `width` pixels wide, for the AI to read."""
+    import pypdfium2 as pdfium
 
-    reader = PdfReader(io.BytesIO(data))
-    writer = PdfWriter()
-    for p in pages:
-        writer.add_page(reader.pages[p - 1])
-    buf = io.BytesIO()
-    writer.write(buf)
-    return buf.getvalue()
+    doc = pdfium.PdfDocument(data)
+    images = []
+    try:
+        for p in pages:
+            page = doc[p - 1]
+            scale = width / max(page.get_width(), 1)
+            img = page.render(scale=scale).to_pil()
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            images.append(buf.getvalue())
+    finally:
+        doc.close()
+    return images
 
 
 def _pptx(filename: str, data: bytes) -> list[Chunk]:

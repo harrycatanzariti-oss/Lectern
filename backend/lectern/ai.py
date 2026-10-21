@@ -1,4 +1,9 @@
-"""Every Claude call the tutor makes: plan the course, write a topic, mark an answer."""
+"""Every AI call the tutor makes: plan the course, write a topic, mark an answer, chat.
+
+Uses DeepSeek's OpenAI-compatible chat API. DeepSeek's JSON mode guarantees valid JSON
+but not its shape, so each reply is checked against a schema here and retried once if
+it doesn't match.
+"""
 from __future__ import annotations
 
 import base64
@@ -8,11 +13,18 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-import anthropic
+import httpx
 
-MODEL = os.environ.get("LECTERN_MODEL", "claude-opus-5-5")
-# Claude reads up to 1M tokens; leave room for instructions and output.
+URL = "https://api.deepseek.com/chat/completions"
+# Names DeepSeek has retired, and what replaced them (as in Otis).
+RETIRED_MODELS = {"deepseek-chat": "deepseek-flash", "deepseek-reasoner": "deepseek-flash",
+                  "deepseek-v4-flash": "deepseek-flash"}
+MODEL = os.environ.get("DEEPSEEK_MODEL", "").strip() or "deepseek-flash"
+MODEL = RETIRED_MODELS.get(MODEL, MODEL)
+# deepseek-flash reads up to 1M tokens; leave room for instructions and output.
 MAX_MATERIAL_CHARS = 3_000_000
+# Thinking mode is on by default and much slower; these tasks don't need it.
+NO_THINKING = {"thinking": {"type": "disabled"}}
 
 SYSTEM = """You are a tutor building a course from a student's own lecture slides and textbook.
 
@@ -29,137 +41,138 @@ class AIError(RuntimeError):
     pass
 
 
+def _status_error(resp: httpx.Response) -> AIError:
+    """A message a student can act on, from a failed DeepSeek response."""
+    code = resp.status_code
+    if code == 401:
+        return AIError("DeepSeek rejected the API key. Check DEEPSEEK_API_KEY.")
+    if code == 402:
+        return AIError("The DeepSeek account is out of credit. Top it up at platform.deepseek.com.")
+    if code == 429:
+        return AIError("DeepSeek is rate-limiting us. Try again in a minute.")
+    if code >= 500:
+        return AIError("DeepSeek is busy or down right now. Try again in a few minutes.")
+    try:
+        detail = resp.json()["error"]["message"]
+    except Exception:
+        detail = resp.text[:200]
+    return AIError(f"DeepSeek rejected the request ({code}): {detail}")
+
+
 @contextmanager
-def _api_errors():
-    """Turn SDK errors into messages a student can act on."""
+def _network_errors():
     try:
         yield
-    except anthropic.AuthenticationError as e:
-        raise AIError("Claude rejected the API key. Check ANTHROPIC_API_KEY.") from e
-    except anthropic.RateLimitError as e:
-        raise AIError("Claude is rate-limiting us. Try again in a minute.") from e
-    except anthropic.APIStatusError as e:
-        raise AIError(f"Claude returned an error ({e.status_code}): {e.message}") from e
-    except anthropic.APIConnectionError as e:
-        raise AIError("Couldn't reach Claude. Check the network connection.") from e
+    except httpx.TimeoutException as e:
+        raise AIError("DeepSeek took too long to answer. Try again.") from e
+    except httpx.HTTPError as e:
+        raise AIError("Couldn't reach DeepSeek. Check the network connection.") from e
 
 
-FALLBACK = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+# ---------- reply shapes ----------
+# A small subset of JSON Schema: objects (every property required), arrays, strings,
+# integers, numbers, booleans and string enums. It's both shown to the model and used
+# to check what comes back.
+
+def _obj(**props: dict) -> dict:
+    return {"type": "object", "properties": props}
 
 
-def _strict(schema: dict) -> dict:
-    """Structured outputs need every object closed and every property required."""
-    if schema.get("type") == "object":
-        schema["additionalProperties"] = False
-        schema["required"] = list(schema["properties"])
-        for prop in schema["properties"].values():
-            _strict(prop)
-    elif schema.get("type") == "array":
-        _strict(schema["items"])
-    return schema
+def _arr(items: dict, description: str = "") -> dict:
+    return {"type": "array", "items": items, **({"description": description} if description else {})}
 
 
-SOURCES = {"type": "array", "items": {"type": "integer"}, "description": "S-ids of the chunks this draws on"}
+STR = {"type": "string"}
+INT = {"type": "integer"}
+SOURCES = _arr(INT, "S-ids of the chunks this draws on")
 
-OUTLINE_SCHEMA = _strict({
-    "type": "object",
-    "properties": {
-        "subject_summary": {"type": "string"},
-        "topics": {
-            "type": "array",
-            "description": "In teaching order: prerequisites first",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "summary": {"type": "string", "description": "One or two sentences on what this topic covers"},
-                    "sources": SOURCES,
-                },
-            },
-        },
-    },
-})
+OUTLINE_SCHEMA = _obj(
+    subject_summary=STR,
+    topics=_arr(_obj(
+        title=STR,
+        summary={"type": "string", "description": "One or two sentences on what this topic covers"},
+        sources=SOURCES,
+    ), "In teaching order: prerequisites first"),
+)
 
-TOPIC_SCHEMA = _strict({
-    "type": "object",
-    "properties": {
-        "lesson_md": {"type": "string"},
-        "key_points": {"type": "array", "items": {"type": "string"}},
-        "flashcards": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "front": {"type": "string"},
-                    "back": {"type": "string"},
-                    "source": {"type": "integer"},
-                },
-            },
-        },
-        "questions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string", "enum": ["mcq", "short"]},
-                    "prompt": {"type": "string"},
-                    "options": {"type": "array", "items": {"type": "string"}, "description": "4 options for mcq; empty for short"},
-                    "answer_index": {"type": "integer", "description": "Index of the correct option for mcq; -1 for short"},
-                    "model_answer": {"type": "string"},
-                    "explanation": {"type": "string"},
-                    "source": {"type": "integer"},
-                },
-            },
-        },
-    },
-})
+TOPIC_SCHEMA = _obj(
+    lesson_md=STR,
+    key_points=_arr(STR),
+    flashcards=_arr(_obj(front=STR, back=STR, source=INT)),
+    questions=_arr(_obj(
+        kind={"type": "string", "enum": ["mcq", "short"]},
+        prompt=STR,
+        options=_arr(STR, "4 options for mcq; empty for short"),
+        answer_index={"type": "integer", "description": "Index of the correct option for mcq; -1 for short"},
+        model_answer=STR,
+        explanation=STR,
+        source=INT,
+    )),
+)
 
-UPDATE_SCHEMA = _strict({
-    "type": "object",
-    "properties": {
-        "topics": {
-            "type": "array",
-            "description": "The whole updated course in teaching order",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "existing_id": {"type": "integer", "description": "id of the existing topic this is, or -1 if new"},
-                    "title": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "sources": SOURCES,
-                    "extend": {
-                        "type": "boolean",
-                        "description": "Existing topic that the new material adds substantial content to",
-                    },
-                },
-            },
-        },
-    },
-})
+UPDATE_SCHEMA = _obj(
+    topics=_arr(_obj(
+        existing_id={"type": "integer", "description": "id of the existing topic this is, or -1 if new"},
+        title=STR,
+        summary=STR,
+        sources=SOURCES,
+        extend={"type": "boolean", "description": "Existing topic that the new material adds substantial content to"},
+    ), "The whole updated course in teaching order"),
+)
 
-TRANSCRIBE_SCHEMA = _strict({
-    "type": "object",
-    "properties": {
-        "pages": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "page": {"type": "integer", "description": "1-based page number within the attached PDF"},
-                    "text": {"type": "string"},
-                },
-            },
-        },
-    },
-})
+TRANSCRIBE_SCHEMA = _obj(
+    pages=_arr(_obj(
+        page={"type": "integer", "description": "1-based position of the image in this message"},
+        text=STR,
+    )),
+)
 
-MARK_SCHEMA = _strict({
-    "type": "object",
-    "properties": {
-        "score": {"type": "number", "description": "0 to 1"},
-        "feedback": {"type": "string"},
-    },
-})
+MARK_SCHEMA = _obj(
+    score={"type": "number", "description": "0 to 1"},
+    feedback=STR,
+)
+
+
+def conform(value: Any, schema: dict, path: str = "reply") -> Any:
+    """Check value against schema, fixing harmless drift (3.0 for 3, "2" for 2).
+    Raises ValueError saying what's wrong."""
+    kind = schema["type"]
+    if kind == "object":
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} should be an object")
+        out = {}
+        for key, sub in schema["properties"].items():
+            if key not in value:
+                raise ValueError(f"{path} is missing {key!r}")
+            out[key] = conform(value[key], sub, f"{path}.{key}")
+        return out
+    if kind == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"{path} should be a list")
+        return [conform(v, schema["items"], f"{path}[{i}]") for i, v in enumerate(value)]
+    if kind == "string":
+        if not isinstance(value, str):
+            raise ValueError(f"{path} should be a string")
+        if "enum" in schema and value not in schema["enum"]:
+            raise ValueError(f"{path} should be one of {schema['enum']}")
+        return value
+    if kind == "boolean":
+        if not isinstance(value, bool):
+            raise ValueError(f"{path} should be true or false")
+        return value
+    if kind in ("integer", "number"):
+        if isinstance(value, bool):
+            raise ValueError(f"{path} should be a number")
+        try:
+            n = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{path} should be a number") from None
+        if kind == "integer":
+            if n != int(n):
+                raise ValueError(f"{path} should be a whole number")
+            return int(n)
+        return n
+    raise ValueError(f"unknown schema type {kind}")
 
 
 def material_text(chunks: list[dict]) -> str:
@@ -167,52 +180,70 @@ def material_text(chunks: list[dict]) -> str:
 
 
 class Tutor:
-    def __init__(self, client: anthropic.Anthropic | None = None):
-        self.client = client or anthropic.Anthropic()
+    def __init__(self, client: httpx.Client | None = None):
+        # Topics can take a few minutes to write; connecting should be quick.
+        self.client = client or httpx.Client(timeout=httpx.Timeout(600, connect=15))
 
-    def _call(self, *, messages: list, schema: dict, effort: str, max_tokens: int = 32000) -> dict:
-        with _api_errors(), self.client.beta.messages.stream(
-            model=MODEL,
-            max_tokens=max_tokens,
-            system=SYSTEM,
-            messages=messages,
-            output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
-            **FALLBACK,
-        ) as stream:
-            msg = stream.get_final_message()
+    def _headers(self) -> dict:
+        key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+        if not key:
+            raise AIError("DEEPSEEK_API_KEY isn't set on the server.")
+        return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
-        if msg.stop_reason == "refusal":
-            raise AIError("Claude declined to process this material.")
-        if msg.stop_reason == "max_tokens":
-            raise AIError("Claude's answer was cut off before it finished.")
-        text = next((b.text for b in msg.content if b.type == "text"), None)
-        if text is None:
-            raise AIError("Claude returned no answer.")
-        return json.loads(text)
+    def _call(self, *, prompt: str | list, schema: dict, max_tokens: int = 16000, temperature: float = 0.3) -> dict:
+        """One JSON reply. The material (if any) leads the prompt, unchanged between calls,
+        so DeepSeek's automatic prefix cache serves it after the first call."""
+        instructions = (
+            "\n\nReply with a single JSON object matching this JSON Schema (every property is "
+            f"required):\n{json.dumps(schema)}"
+        )
+        if isinstance(prompt, str):
+            content: str | list = prompt + instructions
+        else:
+            content = [*prompt, {"type": "text", "text": instructions.strip()}]
+        messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}]
+
+        for attempt in range(2):
+            with _network_errors():
+                resp = self.client.post(URL, headers=self._headers(), json={
+                    **NO_THINKING,
+                    "model": MODEL,
+                    "messages": messages,
+                    "response_format": {"type": "json_object"},
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                })
+            if resp.status_code != 200:
+                raise _status_error(resp)
+            choice = resp.json()["choices"][0]
+            text = choice["message"].get("content") or ""
+            if choice.get("finish_reason") == "length":
+                raise AIError("DeepSeek's answer was cut off before it finished.")
+            try:
+                return conform(json.loads(text), schema)
+            except ValueError as e:  # json.JSONDecodeError is a ValueError too
+                problem = str(e) if text.strip() else "the reply was empty"
+                if attempt:
+                    raise AIError(f"DeepSeek's answer wasn't in the expected format ({problem}).") from e
+                # Show it what went wrong and ask again.
+                messages = [*messages, {"role": "assistant", "content": text or "{}"},
+                            {"role": "user", "content": f"That JSON isn't right: {problem}. Reply again "
+                                                        "with the complete JSON object."}]
+        raise AssertionError("unreachable")
 
     @staticmethod
-    def _material_block(material: str) -> dict:
-        # Identical across every call in a build, so cache it: the first topic pays to
-        # read the material, the rest read it from cache at a tenth of the price.
-        return {
-            "type": "text",
-            "text": f"<material>\n{material}\n</material>",
-            "cache_control": {"type": "ephemeral", "ttl": "1h"},
-        }
+    def _with_material(material: str, task: str) -> str:
+        return f"<material>\n{material}\n</material>\n\n{task}"
 
     def outline(self, subject: str, material: str) -> dict[str, Any]:
         return self._call(
-            effort="high",
-            messages=[{"role": "user", "content": [
-                self._material_block(material),
-                {"type": "text", "text": (
-                    f"Subject: {subject}\n\n"
-                    "Plan a course that covers everything in this material. Split it into topics a "
-                    "student can learn in 15–30 minutes each (usually 6–30 topics, more for a whole "
-                    "textbook). Order them so each topic only relies on earlier ones. Merge material "
-                    "that the slides and textbook both cover into the same topic."
-                )},
-            ]}],
+            prompt=self._with_material(material, (
+                f"Subject: {subject}\n\n"
+                "Plan a course that covers everything in this material. Split it into topics a "
+                "student can learn in 15–30 minutes each (usually 6–30 topics, more for a whole "
+                "textbook). Order them so each topic only relies on earlier ones. Merge material "
+                "that the slides and textbook both cover into the same topic."
+            )),
             schema=OUTLINE_SCHEMA,
         )
 
@@ -222,26 +253,23 @@ class Tutor:
         )
         t = outline[index]
         return self._call(
-            effort="medium",
-            messages=[{"role": "user", "content": [
-                self._material_block(material),
-                {"type": "text", "text": (
-                    f"Subject: {subject}\n\nCourse plan:\n{plan}\n\n"
-                    f"Write topic {index + 1}, \"{t['title']}\" ({t['summary']}). "
-                    f"Its main sources are {', '.join(f'S{s}' for s in t['sources']) or 'spread through the material'}.\n\n"
-                    "- lesson_md: teach the topic as a good tutor would, in 400–1200 words. Don't repeat "
-                    "the topic title as a heading; the page already shows it. Build "
-                    "intuition before formalism, include a worked example where the subject has them, "
-                    "and point out the usual mistakes. Assume the student knows the earlier topics, "
-                    "not the later ones.\n"
-                    "- key_points: 3–7 one-line takeaways.\n"
-                    "- flashcards: 6–15 cards for active recall. One fact per card; the front is a "
-                    "question, never a bare term. Cover definitions, formulas, and the why.\n"
-                    "- questions: 4–8 exam-style practice questions, mixing mcq (exactly 4 options, "
-                    "plausible distractors) and short-answer questions that need reasoning or "
-                    "calculation. Give a full model answer and an explanation of the method."
-                )},
-            ]}],
+            prompt=self._with_material(material, (
+                f"Subject: {subject}\n\nCourse plan:\n{plan}\n\n"
+                f"Write topic {index + 1}, \"{t['title']}\" ({t['summary']}). "
+                f"Its main sources are {', '.join(f'S{s}' for s in t['sources']) or 'spread through the material'}.\n\n"
+                "- lesson_md: teach the topic as a good tutor would, in 400–1200 words. Don't repeat "
+                "the topic title as a heading; the page already shows it. Build "
+                "intuition before formalism, include a worked example where the subject has them, "
+                "and point out the usual mistakes. Assume the student knows the earlier topics, "
+                "not the later ones.\n"
+                "- key_points: 3–7 one-line takeaways.\n"
+                "- flashcards: 6–15 cards for active recall. One fact per card; the front is a "
+                "question, never a bare term. Cover definitions, formulas, and the why. source is "
+                "the number of the S-id it comes from.\n"
+                "- questions: 4–8 exam-style practice questions, mixing mcq (exactly 4 options, "
+                "plausible distractors) and short-answer questions that need reasoning or "
+                "calculation. Give a full model answer and an explanation of the method."
+            )),
             schema=TOPIC_SCHEMA,
         )
 
@@ -251,21 +279,17 @@ class Tutor:
         """Fit newly added files into an existing course without disturbing what's there."""
         current = "\n".join(f"[id {t['id']}] {t['title']}: {t['summary']}" for t in existing)
         return self._call(
-            effort="high",
-            messages=[{"role": "user", "content": [
-                self._material_block(material),
-                {"type": "text", "text": (
-                    f"Subject: {subject}\n\nThe student already has this course, in order:\n{current}\n\n"
-                    f"They have since added: {', '.join(new_files)}. Update the course to cover the "
-                    "new material too. Return the whole course in teaching order:\n"
-                    "- Keep every existing topic, with its existing_id. You may move it, but don't drop, "
-                    "merge or retitle it; the student has progress on it.\n"
-                    "- Where the new material adds substantial content to an existing topic, set extend "
-                    "to true and list the new sources. Otherwise false.\n"
-                    "- Add new topics (existing_id -1, extend false) for anything not yet covered, "
-                    "each 15–30 minutes of learning, placed after their prerequisites."
-                )},
-            ]}],
+            prompt=self._with_material(material, (
+                f"Subject: {subject}\n\nThe student already has this course, in order:\n{current}\n\n"
+                f"They have since added: {', '.join(new_files)}. Update the course to cover the "
+                "new material too. Return the whole course in teaching order:\n"
+                "- Keep every existing topic, with its existing_id. You may move it, but don't drop, "
+                "merge or retitle it; the student has progress on it.\n"
+                "- Where the new material adds substantial content to an existing topic, set extend "
+                "to true and list the new sources. Otherwise false.\n"
+                "- Add new topics (existing_id -1, extend false) for anything not yet covered, "
+                "each 15–30 minutes of learning, placed after their prerequisites."
+            )),
             schema=UPDATE_SCHEMA,
         )
 
@@ -274,45 +298,35 @@ class Tutor:
     ) -> dict[str, Any]:
         """Extra lesson section, cards and questions for an existing topic, from new material."""
         return self._call(
-            effort="medium",
-            messages=[{"role": "user", "content": [
-                self._material_block(material),
-                {"type": "text", "text": (
-                    f"Subject: {subject}\n\nThe topic \"{topic['title']}\" ({topic['summary']}) already has a "
-                    f"lesson with these key points:\n- " + "\n- ".join(have["key_points"]) + "\n\n"
-                    "and flashcards asking:\n- " + "\n- ".join(have["cards"]) + "\n\n"
-                    "and practice questions:\n- " + "\n- ".join(have["questions"]) + "\n\n"
-                    f"New material on it has been added: {', '.join(f'S{s}' for s in sources)}. Write only "
-                    "what's new:\n"
-                    "- lesson_md: a section to append to the lesson, starting with a ## heading, 200–800 "
-                    "words, teaching what the new material adds.\n"
-                    "- key_points: 1–4 new takeaways.\n"
-                    "- flashcards: 3–10 cards for the new content, none repeating the existing ones.\n"
-                    "- questions: 2–5 new exam-style questions (mcq with exactly 4 options, or short)."
-                )},
-            ]}],
+            prompt=self._with_material(material, (
+                f"Subject: {subject}\n\nThe topic \"{topic['title']}\" ({topic['summary']}) already has a "
+                f"lesson with these key points:\n- " + "\n- ".join(have["key_points"]) + "\n\n"
+                "and flashcards asking:\n- " + "\n- ".join(have["cards"]) + "\n\n"
+                "and practice questions:\n- " + "\n- ".join(have["questions"]) + "\n\n"
+                f"New material on it has been added: {', '.join(f'S{s}' for s in sources)}. Write only "
+                "what's new:\n"
+                "- lesson_md: a section to append to the lesson, starting with a ## heading, 200–800 "
+                "words, teaching what the new material adds.\n"
+                "- key_points: 1–4 new takeaways.\n"
+                "- flashcards: 3–10 cards for the new content, none repeating the existing ones.\n"
+                "- questions: 2–5 new exam-style questions (mcq with exactly 4 options, or short)."
+            )),
             schema=TOPIC_SCHEMA,
         )
 
-    def transcribe(self, filename: str, pdf: bytes, pages: list[int]) -> dict[int, str]:
-        """Read PDF pages that have no usable text layer. Returns {original page: text}."""
-        result = self._call(
-            effort="low",
-            max_tokens=64000,
-            messages=[{"role": "user", "content": [
-                {"type": "document", "source": {
-                    "type": "base64", "media_type": "application/pdf",
-                    "data": base64.standard_b64encode(pdf).decode(),
-                }},
-                {"type": "text", "text": (
-                    f"These are pages from {filename}, a student's course material. For each page, "
-                    "transcribe all the text, with maths in LaTeX, and describe every diagram, graph, "
-                    "table or figure in enough detail that a student could learn from the description "
-                    "alone. Skip pages that are blank or purely decorative."
-                )},
-            ]}],
-            schema=TRANSCRIBE_SCHEMA,
-        )
+    def transcribe(self, filename: str, images: list[bytes], pages: list[int]) -> dict[int, str]:
+        """Read page images (PNG) that had no usable text layer. Returns {original page: text}."""
+        prompt: list[dict] = [{"type": "text", "text": (
+            f"These {len(images)} images are pages from {filename}, a student's course material, in "
+            "order. For each page, transcribe all the text, with maths in LaTeX, and describe every "
+            "diagram, graph, table or figure in enough detail that a student could learn from the "
+            "description alone. Skip pages that are blank or purely decorative."
+        )}]
+        for png in images:
+            prompt.append({"type": "image_url", "image_url": {
+                "url": "data:image/png;base64," + base64.standard_b64encode(png).decode(),
+            }})
+        result = self._call(prompt=prompt, schema=TRANSCRIBE_SCHEMA, max_tokens=32000, temperature=0)
         out = {}
         for p in result["pages"]:
             if 1 <= p["page"] <= len(pages) and p["text"].strip():
@@ -336,35 +350,39 @@ class Tutor:
             "depth. If the student asks you to quiz them or says they don't get something, teach "
             "Socratically: one question at a time, and let them try before you explain."
         )
-        # Material first and unchanged, so it shares the cache with the course build.
-        messages: list[dict] = []
+        # Material first and unchanged, so the prefix cache serves it on every message.
+        messages: list[dict] = [{"role": "system", "content": SYSTEM}]
         for i, m in enumerate([*history, {"role": "user", "content": message}]):
-            if i == 0:
-                messages.append({"role": "user", "content": [
-                    self._material_block(material),
-                    {"type": "text", "text": f"{intro}\n\nStudent: {m['content']}"},
-                ]})
-            else:
-                messages.append({"role": m["role"], "content": m["content"]})
-        with _api_errors(), self.client.beta.messages.stream(
-            model=MODEL,
-            max_tokens=16000,
-            system=SYSTEM,
-            messages=messages,
-            output_config={"effort": "low"},
-            cache_control={"type": "ephemeral"},
-            **FALLBACK,
-        ) as stream:
-            yield from stream.text_stream
-            msg = stream.get_final_message()
-        if msg.stop_reason == "refusal":
-            raise AIError("Claude declined to answer that.")
+            content = self._with_material(material, f"{intro}\n\nStudent: {m['content']}") if i == 0 else m["content"]
+            messages.append({"role": m["role"], "content": content})
+
+        with _network_errors(), self.client.stream("POST", URL, headers=self._headers(), json={
+            **NO_THINKING,
+            "model": MODEL,
+            "messages": messages,
+            "max_tokens": 8000,
+            "temperature": 0.5,
+            "stream": True,
+        }) as resp:
+            if resp.status_code != 200:
+                resp.read()
+                raise _status_error(resp)
+            # Server-sent events: "data: {json}" lines, ending with "data: [DONE]".
+            for line in resp.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                delta = json.loads(data)["choices"][0].get("delta", {})
+                if delta.get("content"):
+                    yield delta["content"]
 
     def mark(self, question: dict, answer: str) -> dict[str, Any]:
         result = self._call(
-            effort="low",
-            max_tokens=8000,
-            messages=[{"role": "user", "content": (
+            max_tokens=2000,
+            temperature=0,
+            prompt=(
                 "Mark a student's answer to a practice question.\n\n"
                 f"<question>{question['prompt']}</question>\n"
                 f"<model_answer>{question['model_answer']}</model_answer>\n"
@@ -373,8 +391,8 @@ class Tutor:
                 "correct method with a slip. Accept any correct answer, not only the model one. "
                 "In feedback, speak to the student in 1–4 sentences: what was right, what was "
                 "missing or wrong, and how to fix it."
-            )}],
+            ),
             schema=MARK_SCHEMA,
         )
-        result["score"] = min(1.0, max(0.0, float(result["score"])))
+        result["score"] = min(1.0, max(0.0, result["score"]))
         return result

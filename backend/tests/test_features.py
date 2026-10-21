@@ -15,7 +15,7 @@ def test_image_pages_are_read_by_claude(client):
     r = client.post(f"/api/subjects/{sid}/documents",
                     files=[("files", ("scan.pdf", make_pdf(RULE, ""), "application/pdf"))])
     doc = r.json()["documents"][0]
-    assert doc["image_pages"] == [2] and "Claude will read it" in doc["warning"]
+    assert doc["image_pages"] == [2] and "The AI will read it" in doc["warning"]
     assert (db.UPLOADS / f"{doc['id']}.pdf").exists()
 
     build(client, sid)
@@ -214,3 +214,20 @@ def test_export_for_claude_project(client):
     full = client.get(f"/api/subjects/{sid}/export?material=true")
     assert "with-material" in full.headers["content-disposition"]
     assert "### notes.txt" in full.text and "Derivatives are slopes." in full.text
+
+
+def test_unreadable_image_pages_dont_fail_the_build(client):
+    from lectern.ai import AIError
+
+    def refuse(*a):
+        raise AIError("DeepSeek rejected the request (400): images not supported")
+    client.fake.transcribe = refuse
+    sid = make_subject(client)
+    r = client.post(f"/api/subjects/{sid}/documents",
+                    files=[("files", ("scan.pdf", make_pdf(RULE, ""), "application/pdf"))])
+    doc = r.json()["documents"][0]
+    build(client, sid)
+    s = client.get(f"/api/subjects/{sid}").json()
+    assert s["build_status"] == "built"
+    d = s["documents"][0]
+    assert d["image_pages"] == [] and "images not supported" in d["warning"] and d["id"] == doc["id"]

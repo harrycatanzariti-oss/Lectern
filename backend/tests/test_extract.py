@@ -2,7 +2,7 @@ import io
 
 import pytest
 
-from lectern.extract import UnsupportedFile, extract, pdf_pages
+from lectern.extract import UnsupportedFile, extract, render_pages
 
 
 def test_text_splits_into_parts():
@@ -67,9 +67,9 @@ def test_pdf_pages():
     assert got.image_pages == [2, 3]  # blank and nearly-blank pages go to Claude
 
 
-def test_pdf_subset():
-    sub = extract("x.pdf", pdf_pages(make_pdf("a", RULE, "c"), [2]))
-    assert [c.text for c in sub.chunks] == [RULE]
+def test_render_pages():
+    images = render_pages(make_pdf("a", RULE, "c"), [1, 3], width=300)
+    assert len(images) == 2 and all(i.startswith(b"\x89PNG") for i in images)
 
 
 def test_unsupported():

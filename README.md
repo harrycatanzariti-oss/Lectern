@@ -2,7 +2,7 @@
 
 Drop in your lecture slides and textbook and Lectern turns them into a course that
 teaches you: ordered lessons, flashcards on spaced repetition, exam-style practice
-questions that Claude marks, mock exams, and a tutor you can ask about any of it. One app,
+questions the AI marks, mock exams, and a tutor you can ask about any of it. One app,
 as many subjects as you're taking.
 
 It borrows from two other projects:
@@ -18,10 +18,10 @@ It borrows from two other projects:
 
 1. **Create a subject** (e.g. *MATH1131 Calculus*) and upload its material: PDF,
    PowerPoint (.pptx), .txt or .md. Lectern pulls the text from every page and slide,
-   speaker notes included, and keeps track of where each piece came from. Claude reads
+   speaker notes included, and keeps track of where each piece came from. The AI reads
    PDF pages that are mostly pictures (scans, diagrams, slides exported as images) during
    the build: it transcribes the text and describes the figures.
-2. **Build the course.** Claude reads everything in the subject at once and plans the
+2. **Build the course.** The AI reads everything in the subject at once and plans the
    topics in teaching order, prerequisites first. Then, for each topic, it writes a
    lesson, 6–15 flashcards and 4–8 practice questions. Every item points back to the
    page or slide it came from.
@@ -30,7 +30,7 @@ It borrows from two other projects:
      one comes back just before you'd forget it.
    - **Learn**: the next lesson on the path. When you finish it, its flashcards and
      questions unlock.
-   - **Practise**: multiple-choice questions are marked instantly. Claude marks
+   - **Practise**: multiple-choice questions are marked instantly. The AI marks
      short-answer questions against the model answer, gives partial credit, and says
      what to fix.
 4. **Ask the tutor.** Every lesson has a chat that knows that topic, and each subject
@@ -58,7 +58,7 @@ for adding files, so this step is manual.
 
 ### Adding material later
 
-Upload the next week's slides and click **Update course**. Claude fits the new material
+Upload the next week's slides and click **Update course**. The AI fits the new material
 into the existing course:
 
 - Topics you already have keep their lessons, cards and your progress.
@@ -72,11 +72,11 @@ into the existing course:
 
 ## Running it
 
-You need Python 3.11+, Node 20+, and an Anthropic API key.
+You need Python 3.11+, Node 20+, and a DeepSeek API key (platform.deepseek.com).
 
 ```bash
 ./run.sh setup                      # install dependencies
-cp .env.example .env                # then put your ANTHROPIC_API_KEY in .env
+cp .env.example .env                # then put your DEEPSEEK_API_KEY in .env
 ./run.sh dev                        # API on :8000, app on http://localhost:5173
 ```
 
@@ -87,16 +87,16 @@ build.
 ### Putting it online
 
 `render.yaml` is a Render blueprint for the `Dockerfile`: one web service with a 5 GB disk
-at `/data` for the database and uploaded PDFs. Set `ANTHROPIC_API_KEY` and
+at `/data` for the database and uploaded PDFs. Set `DEEPSEEK_API_KEY` and
 **`LECTERN_PASSWORD`** in Render. Without a password, anyone who finds the URL can spend
-your Claude credit. The disk needs a paid instance; on the free tier, data is wiped on
+your DeepSeek credit. The disk needs a paid instance; on the free tier, data is wiped on
 every deploy.
 
 | Variable | Default | |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | (required) | |
+| `DEEPSEEK_API_KEY` | (required) | |
 | `LECTERN_PASSWORD` | none | Turns on the sign-in page |
-| `LECTERN_MODEL` | `claude-opus-5-5` | The model for every call |
+| `DEEPSEEK_MODEL` | `deepseek-flash` | The model for every call |
 | `LECTERN_DATA` | `./data` | Database and uploads |
 
 ## Layout
@@ -104,7 +104,7 @@ every deploy.
 | Path | What's there |
 |------|--------------|
 | `backend/lectern/extract.py` | PDF / PPTX / text → one labelled chunk per page or slide |
-| `backend/lectern/ai.py` | Every Claude call: plan the course, write a topic, mark an answer |
+| `backend/lectern/ai.py` | Every AI call (DeepSeek): plan the course, write a topic, mark an answer, chat |
 | `backend/lectern/builder.py` | The background build: read image pages, plan or update the outline, write topics 4 at a time |
 | `backend/lectern/srs.py` | Spaced-repetition scheduling |
 | `backend/lectern/api.py` | HTTP API, mastery, next-step logic, chat streaming, exams, sign-in; serves the built frontend |
@@ -114,22 +114,24 @@ every deploy.
 
 ## About the AI calls
 
-- Model: `claude-opus-5-5` by default (set `LECTERN_MODEL` to change it). Calls use
-  structured outputs, so the course arrives as validated JSON, and server-side refusal
-  fallbacks.
-- The whole subject goes to Claude in a single request, up to about 750k tokens, which is
-  a couple of full textbooks. A subject bigger than that gets an error asking you to split
-  it.
-- The material is marked for prompt caching. The first topic pays to read it and the
-  other topics read it from cache, which cuts the cost of a build by roughly 10×.
-- The tutor chat sends the subject's material with every message. It's cached, so after
-  the first message each question costs roughly what a tenth of the material costs to
-  read, at `low` effort to keep replies quick.
+- **Provider:** DeepSeek's chat API, with `deepseek-flash` by default (set
+  `DEEPSEEK_MODEL` to change it). Thinking mode is off, as in Otis, to keep calls quick.
+- **Checking replies:** DeepSeek's JSON mode returns valid JSON but doesn't enforce its
+  shape. `ai.py` checks every reply against a schema, fixes harmless drift (like `"2"` for
+  `2`), and asks once more if something is missing.
+- **Context size:** the whole subject goes in a single request, up to about 750k tokens of
+  the model's 1M, which is a couple of full textbooks. A subject bigger than that gets an
+  error asking you to split it.
+- **Caching:** DeepSeek caches repeated prompt prefixes automatically. Every call puts
+  the material first, unchanged, so after the first topic the material is billed at the
+  cache-hit price, about 2% of the normal rate. The tutor chat works the same way.
+- **Image pages:** these are rendered to PNGs and sent as images. If DeepSeek can't read
+  them, the build carries on without them and the file shows a note.
 
 ## Not built yet
 
 - PowerPoint slides that are only images (python-pptx can't render them). Export the deck
-  as a PDF and Claude reads the pictures.
+  as a PDF and the AI reads the pictures.
 - Accounts and sync: it's single-user, with one optional shared password.
 - Fresh exam questions. Exams draw from each topic's question pool, which grows when new
   material extends a topic.

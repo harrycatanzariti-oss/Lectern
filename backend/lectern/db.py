@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS documents (
     units INTEGER NOT NULL DEFAULT 0, -- pages or slides with text
     chars INTEGER NOT NULL DEFAULT 0,
     warning TEXT NOT NULL DEFAULT '',
-    image_pages TEXT NOT NULL DEFAULT '[]', -- pages with too little text; Claude reads them at build
+    image_pages TEXT NOT NULL DEFAULT '[]', -- pages with too little text; the AI reads them at build
     in_course INTEGER NOT NULL DEFAULT 0,    -- set once a build has used this document
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

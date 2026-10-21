@@ -11,7 +11,7 @@ services:
       mountPath: /data
       sizeGB: 5
     envVars:
-      - key: ANTHROPIC_API_KEY
+      - key: DEEPSEEK_API_KEY
         sync: false
       - key: LECTERN_PASSWORD
         sync: false

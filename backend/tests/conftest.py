@@ -64,7 +64,8 @@ class FakeTutor:
             "questions": [],
         }
 
-    def transcribe(self, filename, pdf, pages):
+    def transcribe(self, filename, images, pages):
+        assert len(images) == len(pages)
         return {p: f"Diagram on page {p} of {filename}" for p in pages}
 
     def chat(self, subject, material, topic, history, message):

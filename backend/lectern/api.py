@@ -51,7 +51,7 @@ def set_tutor(t: Tutor) -> None:
 
 # ---------- optional password ----------
 # Set LECTERN_PASSWORD when the app is reachable from the internet; otherwise anyone who
-# finds it can spend your Claude credit.
+# finds it can spend your DeepSeek credit.
 PASSWORD = os.environ.get("LECTERN_PASSWORD", "")
 COOKIE = "lectern_auth"
 
@@ -276,7 +276,7 @@ async def upload(subject_id: int, files: list[UploadFile] = File(...), kind: str
         warning = ""
         if got.image_pages:
             n = len(got.image_pages)
-            warning = f"{n} page{'s are' if n != 1 else ' is'} mostly images. Claude will read {'them' if n != 1 else 'it'} when you build."
+            warning = f"{n} page{'s are' if n != 1 else ' is'} mostly images. The AI will read {'them' if n != 1 else 'it'} when you build."
         elif not chunks:
             warning = "No text found in this file."
         with db.tx() as conn:
@@ -291,7 +291,7 @@ async def upload(subject_id: int, files: list[UploadFile] = File(...), kind: str
                 [(doc_id, subject_id, c.page, c.label, c.text) for c in chunks],
             )
             if got.image_pages:
-                # Kept so Claude can look at the image pages during the build.
+                # Kept so the AI can look at the image pages during the build.
                 db.UPLOADS.mkdir(parents=True, exist_ok=True)
                 (db.UPLOADS / f"{doc_id}.pdf").write_bytes(data)
             conn.execute(
@@ -497,7 +497,7 @@ def review_all():
 
 # ---------- tutor chat ----------
 
-CHAT_HISTORY = 40  # messages of the thread sent back to Claude
+CHAT_HISTORY = 40  # messages of the thread sent back to the AI
 
 
 def _thread(conn, subject_id: int, topic_id: int | None) -> list[dict]:

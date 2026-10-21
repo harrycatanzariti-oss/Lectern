@@ -14,13 +14,13 @@ from typing import Callable
 
 from . import db
 from .ai import MAX_MATERIAL_CHARS, AIError, Tutor, material_text
-from .extract import pdf_label, pdf_pages
+from .extract import pdf_label, render_pages
 
 log = logging.getLogger(__name__)
 PARALLEL_TOPICS = 4
-# Pages per transcription request: enough to be efficient, few enough to stay well
-# inside the output limit when every page is dense.
-TRANSCRIBE_BATCH = 20
+# Page images per transcription request: enough to be efficient, few enough to keep
+# each request well under DeepSeek's size limit and its answer under the output limit.
+TRANSCRIBE_BATCH = 8
 
 _running: set[int] = set()
 _lock = threading.Lock()
@@ -65,7 +65,10 @@ def _run(subject_id: int, tutor: Tutor, fresh: bool) -> None:
 
 
 def read_image_pages(subject_id: int, tutor: Tutor) -> None:
-    """Have Claude read PDF pages that came without a usable text layer."""
+    """Have the AI read PDF pages that came without a usable text layer.
+
+    A batch the AI can't read is skipped with a note on the file rather than failing
+    the build: the rest of the course is still worth having."""
     with db.tx() as conn:
         docs = db.rows(conn.execute(
             "SELECT id, filename, image_pages FROM documents WHERE subject_id=? AND image_pages != '[]'",
@@ -79,19 +82,29 @@ def read_image_pages(subject_id: int, tutor: Tutor) -> None:
             continue
         data = path.read_bytes()
         pages = d["image_pages"]
+        failed_note = ""
         for start in range(0, len(pages), TRANSCRIBE_BATCH):
             batch = pages[start:start + TRANSCRIBE_BATCH]
             _status(subject_id, "building", f"Reading image pages ({done} of {total})", 0.01 + 0.02 * done / total)
-            texts = tutor.transcribe(d["filename"], pdf_pages(data, batch), batch)
+            try:
+                texts = tutor.transcribe(d["filename"], render_pages(data, batch), batch)
+                note = ""
+            except AIError as e:
+                log.warning("couldn't read pages %s of %s: %s", batch, d["filename"], e)
+                texts = {}
+                note = f"Couldn't read some image pages ({e}). Upload a text version to include them."
             with db.tx() as conn:
                 conn.executemany(
                     "INSERT INTO chunks (document_id, subject_id, idx, label, text) VALUES (?,?,?,?,?)",
                     [(d["id"], subject_id, p, pdf_label(d["filename"], p), t) for p, t in texts.items()],
                 )
                 left = [p for p in d["image_pages"] if p not in batch]
+                # The upload's "the AI will read these" note is done with; a failure note stays.
+                warning = note or failed_note
+                failed_note = warning
                 conn.execute(
-                    "UPDATE documents SET image_pages=?, units=units+?, chars=chars+?, warning='' WHERE id=?",
-                    (json.dumps(left), len(texts), sum(map(len, texts.values())), d["id"]),
+                    "UPDATE documents SET image_pages=?, units=units+?, chars=chars+?, warning=? WHERE id=?",
+                    (json.dumps(left), len(texts), sum(map(len, texts.values())), warning, d["id"]),
                 )
                 d["image_pages"] = left
             done += len(batch)
@@ -108,7 +121,7 @@ def _load_material(subject_id: int) -> tuple[dict, str, dict[int, str]]:
     material = material_text(chunks)
     if len(material) > MAX_MATERIAL_CHARS:
         raise AIError(
-            f"This subject has about {len(material) // 4000}k tokens of text, more than Claude can read "
+            f"This subject has about {len(material) // 4000}k tokens of text, more than the AI can read "
             "at once. Split it into two subjects (e.g. by semester or textbook part)."
         )
     return subject, material, {c["id"]: c["label"] for c in chunks}
@@ -130,7 +143,7 @@ def _fresh(subject: dict, material: str, labels: dict[int, str], tutor: Tutor) -
     _status(subject_id, "building", "Planning the course", 0.03)
     outline = tutor.outline(subject["name"], material)["topics"]
     if not outline:
-        raise AIError("Claude couldn't find any topics in this material.")
+        raise AIError("The AI couldn't find any topics in this material.")
     for t in outline:
         t["sources"] = [s for s in t["sources"] if s in labels]
 
@@ -173,7 +186,7 @@ def _update(subject: dict, material: str, labels: dict[int, str], tutor: Tutor) 
             for t in existing
         ]
 
-    # Claude must keep every existing topic; put back any it dropped, after its old neighbour.
+    # The AI must keep every existing topic; put back any it dropped, after its old neighbour.
     seen: set[int] = set()
     course: list[dict] = []
     for t in planned:
@@ -259,13 +272,13 @@ def _write_all(
             done += 1
             _status(subject_id, "building", f"Wrote {done} of {total} topics", 0.05 + 0.95 * done / total)
 
-    # The first call writes the material into Claude's cache; the rest read from it.
+    # The first call puts the material in DeepSeek's prefix cache; the rest read from it.
     write(jobs[0])
     with ThreadPoolExecutor(PARALLEL_TOPICS) as pool:
         list(pool.map(write, jobs[1:]))
 
     if failed == total:
-        _status(subject_id, "failed", "Claude couldn't write any topics. Try building again.", 1)
+        _status(subject_id, "failed", "The AI couldn't write any topics. Try building again.", 1)
     elif failed:
         _finish(subject_id, f"{failed} of {total} topics failed to write. Update the course to retry them.")
     else:
