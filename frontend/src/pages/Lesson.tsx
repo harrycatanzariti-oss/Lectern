@@ -1,9 +1,10 @@
 import { ArrowLeft, ArrowRight, Check, Layers, PenLine } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { LevelDial } from "../components/LevelDial";
 import { AskButton, TutorChat } from "../components/TutorChat";
 import { ErrorNote, Markdown, Spinner, btnGhost, btnPrimary, card } from "../components/ui";
-import { api, type Topic } from "../lib/api";
+import { LEVELS, STANDARD, api, saveLevel, savedLevel, type Topic } from "../lib/api";
 
 export default function Lesson() {
   const id = Number(useParams().id);
@@ -11,13 +12,40 @@ export default function Lesson() {
   const [topic, setTopic] = useState<Topic | null>(null);
   const [error, setError] = useState("");
   const [chatOpen, setChatOpen] = useState(false);
+  const [level, setLevel] = useState(savedLevel);
+  // The lesson shown at `level`; null while it's being rewritten for the first time.
+  const [lesson, setLesson] = useState<{ level: number; md: string } | null>(null);
+  const [lessonError, setLessonError] = useState("");
 
   useEffect(() => {
     setTopic(null);
+    setLesson(null);
     setChatOpen(false);
     api.topic(id).then(setTopic, (e) => setError(e.message));
     window.scrollTo(0, 0);
   }, [id]);
+
+  useEffect(() => {
+    if (!topic || topic.id !== id) return;
+    setLessonError("");
+    if (level === STANDARD) {
+      setLesson({ level, md: topic.lesson_md });
+      return;
+    }
+    let live = true;
+    api.lesson(id, level).then(
+      (r) => live && setLesson({ level, md: r.lesson_md }),
+      (e) => live && setLessonError(e.message),
+    );
+    return () => {
+      live = false;
+    };
+  }, [topic, id, level]);
+
+  const turnDial = (n: number) => {
+    setLevel(n);
+    saveLevel(n);
+  };
 
   if (error) return <ErrorNote error={error} />;
   if (!topic) return <Spinner />;
@@ -49,7 +77,18 @@ export default function Lesson() {
         <p className="mt-2 text-neutral-500">{topic.summary}</p>
       </div>
 
-      <Markdown>{topic.lesson_md}</Markdown>
+      <LevelDial value={level} onChange={turnDial} busy={!lessonError && lesson?.level !== level} />
+
+      {lessonError ? (
+        <ErrorNote error={`Couldn't rewrite this at the ${LEVELS[level - 1]} level: ${lessonError}`} />
+      ) : !lesson ? (
+        <Spinner label={`Writing the ${LEVELS[level - 1]} version…`} />
+      ) : (
+        // While another level is being written, the last one stays up, faded.
+        <div className={`lesson transition-opacity ${lesson.level !== level ? "opacity-40" : ""}`}>
+          <Markdown>{lesson.md}</Markdown>
+        </div>
+      )}
 
       {topic.key_points.length > 0 && (
         <section className={`${card} p-5`}>

@@ -33,6 +33,10 @@ It borrows from two other projects:
    - **Practise**: multiple-choice questions are marked instantly. The AI marks
      short-answer questions against the model answer, gives partial credit, and says
      what to fix.
+   - **Explanation level**: a dial at the top of every lesson slides from *Simplest*
+     through *Standard* to *Rigorous*. The AI rewrites the lesson at that level the
+     first time you pick it, then keeps the rewrite. The tutor pitches its answers at the
+     same level, and your setting carries over to every lesson.
 4. **Ask the tutor.** Every lesson has a chat that knows that topic, and each subject
    has one that knows the whole subject. Answers come from your material with page
    references, and the tutor will quiz you Socratically if you ask.

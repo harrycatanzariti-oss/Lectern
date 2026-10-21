@@ -139,3 +139,11 @@ def test_chat_error_before_streaming():
     t = ai.Tutor(httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(402, json={}))))
     with pytest.raises(ai.AIError, match="out of credit"):
         list(t.chat("Calc", "x", None, [], "hi"))
+
+
+def test_restyle_asks_for_the_level():
+    t = tutor({"lesson_md": "Simpler."})
+    topic = {"title": "Limits", "summary": "What a limit is", "lesson_md": "A limit is…"}
+    assert t.restyle("Calc", topic, 1) == "Simpler."
+    prompt = t.requests[0]["messages"][1]["content"]
+    assert '"Simplest" level' in prompt and "<lesson>\nA limit is…\n</lesson>" in prompt

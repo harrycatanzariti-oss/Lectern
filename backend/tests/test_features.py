@@ -360,3 +360,27 @@ def test_failed_syllabus_doesnt_fail_the_build(client):
     s = client.get(f"/api/subjects/{sid}").json()
     assert s["build_status"] == "built" and "Rebuild syllabus" in s["build_message"]
     assert client.get(f"/api/subjects/{sid}/syllabus").json()["sections"] == []
+
+
+def test_lesson_dial(client):
+    sid = make_subject(client)
+    upload(client, sid)
+    build(client, sid)
+    tid = topics(client, sid)[0]["id"]
+    lesson = client.get(f"/api/topics/{tid}").json()["lesson_md"]
+
+    assert client.get(f"/api/topics/{tid}/lesson?level=3").json()["lesson_md"] == lesson
+    assert client.get(f"/api/topics/{tid}/lesson?level=6").status_code == 422
+    simple = client.get(f"/api/topics/{tid}/lesson?level=1").json()["lesson_md"]
+    assert simple == f"Level 1: {lesson}"
+    client.get(f"/api/topics/{tid}/lesson?level=1")
+    assert client.fake.restyle_calls == 1  # kept, not rewritten again
+
+    # A changed lesson makes the kept rewrite stale.
+    with db.tx() as conn:
+        conn.execute("UPDATE topics SET lesson_md='New lesson' WHERE id=?", (tid,))
+    assert client.get(f"/api/topics/{tid}/lesson?level=1").json()["lesson_md"] == "Level 1: New lesson"
+    assert client.fake.restyle_calls == 2
+
+    client.post(f"/api/subjects/{sid}/chat", json={"message": "Hi", "topic_id": tid, "level": 5})
+    assert client.fake.chat_level == 5

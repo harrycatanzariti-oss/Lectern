@@ -236,6 +236,7 @@ export const api = {
   deleteDocument: (id: number) => req<void>(`/documents/${id}`, { method: "DELETE" }),
   build: (id: number, fresh: boolean) => req<{ ok: true }>(`/subjects/${id}/build`, json("POST", { fresh })),
   topic: (id: number) => req<Topic>(`/topics/${id}`),
+  lesson: (id: number, level: number) => req<{ level: number; lesson_md: string }>(`/topics/${id}/lesson?level=${level}`),
   completeTopic: (id: number) => req<{ ok: true }>(`/topics/${id}/complete`, { method: "POST" }),
   review: (subjectId: number, topicId?: number) =>
     req<{ cards: Card[]; due: number; new: number }>(
@@ -263,6 +264,29 @@ export const api = {
     req<void>(`/subjects/${subjectId}/chat${topicId ? `?topic_id=${topicId}` : ""}`, { method: "DELETE" }),
 };
 
+/** The lesson dial, from plainest to most formal. The lesson as built is STANDARD. */
+export const LEVELS = ["Simplest", "Simple", "Standard", "Detailed", "Rigorous"] as const;
+export const STANDARD = 3;
+const LEVEL_KEY = "lectern.level";
+
+/** The dial's setting, remembered on this device for every lesson and the tutor. */
+export function savedLevel(): number {
+  try {
+    const n = Number(localStorage.getItem(LEVEL_KEY));
+    return n >= 1 && n <= LEVELS.length ? n : STANDARD;
+  } catch {
+    return STANDARD;
+  }
+}
+
+export function saveLevel(level: number) {
+  try {
+    localStorage.setItem(LEVEL_KEY, String(level));
+  } catch {
+    /* private mode: it just isn't remembered */
+  }
+}
+
 /** Send a chat message; onText gets the reply as it streams in. Resolves when it's complete. */
 export async function sendChat(
   subjectId: number,
@@ -270,7 +294,7 @@ export async function sendChat(
   topicId: number | undefined,
   onText: (piece: string) => void,
 ): Promise<void> {
-  const res = await fetch(`/api/subjects/${subjectId}/chat`, json("POST", { message, topic_id: topicId ?? null }));
+  const res = await fetch(`/api/subjects/${subjectId}/chat`, json("POST", { message, topic_id: topicId ?? null, level: savedLevel() }));
   if (res.status === 401) onSignedOut();
   if (!res.ok || !res.body) {
     let msg = `Request failed (${res.status})`;

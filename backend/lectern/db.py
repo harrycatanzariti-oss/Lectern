@@ -128,6 +128,15 @@ CREATE TABLE IF NOT EXISTS syllabus_items (
     topic_ids TEXT NOT NULL DEFAULT '[]',       -- course topics that teach it
     confidence INTEGER NOT NULL DEFAULT 0       -- the student's own: 0 unrated, 1 not yet, 2 getting there, 3 confident
 );
+-- Lessons rewritten at other levels of the lesson dial, kept so each is only written once.
+-- base is a hash of the lesson they were rewritten from; a changed lesson makes them stale.
+CREATE TABLE IF NOT EXISTS lesson_versions (
+    topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    level INTEGER NOT NULL,
+    base TEXT NOT NULL,
+    lesson_md TEXT NOT NULL,
+    PRIMARY KEY (topic_id, level)
+);
 CREATE INDEX IF NOT EXISTS syllabus_items_subject ON syllabus_items(subject_id, section_id, position);
 CREATE INDEX IF NOT EXISTS chat_thread ON chat_messages(subject_id, topic_id, id);
 CREATE INDEX IF NOT EXISTS chunks_subject ON chunks(subject_id, document_id, idx);

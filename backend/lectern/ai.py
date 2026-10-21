@@ -33,8 +33,31 @@ background a lecturer would expect students to know, but never contradict the ma
 prefer its notation, terms and examples. Every source id you cite must be one of the [S…] ids \
 in the material.
 
-Write for a university student: clear, concrete, no filler. Use Markdown. Write maths in LaTeX \
-between $…$ (inline) or $$…$$ (display)."""
+Write for a university student, in Markdown, so it's easy to scan:
+- Short paragraphs: one idea each, one to three sentences. Never a wall of text.
+- Lead with the point, then the detail. Bold a key term where it's defined.
+- Use a list for steps, conditions or comparisons, and a table when comparing several things.
+- Cut filler: no "In this section we will…", no restating, no padding. If a sentence can go, it goes.
+
+Write maths in LaTeX between $…$ (inline) or $$…$$ (display)."""
+
+# The lesson dial on the lesson page, from plainest to most formal. The lesson as built is
+# the standard level; the others are rewrites of it, made on demand.
+LEVELS = {
+    1: ("Simplest", "Explain it to a bright student meeting it for the first time. Everyday words, an "
+        "analogy or picture first, every term defined as it appears, notation only where it's unavoidable. "
+        "Keep only the core ideas; shortest of all."),
+    2: ("Simple", "Plain English. Intuition and a concrete example before any formal statement; define "
+        "jargon on first use; light notation. Shorter than the standard lesson."),
+    3: ("Standard", "A clear university lesson: intuition, then the formal idea, a worked example and the "
+        "usual mistakes."),
+    4: ("Detailed", "Fuller than the standard lesson: precise definitions, every condition stated, the key "
+        "results derived, edge cases and how this connects to related ideas."),
+    5: ("Rigorous", "High-level and formal, like a good textbook or lecture notes: exact definitions, "
+        "theorems with their hypotheses, proofs or derivations (sketched where long), and the field's "
+        "standard notation and terminology. No analogies."),
+}
+STANDARD = 3
 
 
 class AIError(RuntimeError):
@@ -158,6 +181,17 @@ SYLLABUS_SCHEMA = _obj(
 MARK_SCHEMA = _obj(
     score={"type": "number", "description": "0 to 1"},
     feedback=STR,
+)
+
+RESTYLE_SCHEMA = _obj(lesson_md=STR)
+
+# How a lesson is laid out, for every lesson the AI writes or rewrites.
+LESSON_SHAPE = (
+    "Shape it in chunks: open with one or two sentences on what this is and why it matters, then "
+    "3–6 ## sections with short, plain headings, each covering one idea in a few short paragraphs "
+    "or a list. Give a worked example its own section, with numbered steps. Put the usual mistakes "
+    "in a short bulleted list near the end. Don't repeat the topic title as a heading; the page "
+    "already shows it."
 )
 
 
@@ -304,12 +338,11 @@ class Tutor:
                 f"Subject: {subject}\n\nCourse plan:\n{plan}\n\n"
                 f"Write topic {index + 1}, \"{t['title']}\" ({t['summary']}). "
                 f"Its main sources are {', '.join(f'S{s}' for s in t['sources']) or 'spread through the material'}.\n\n"
-                "- lesson_md: teach the topic as a good tutor would, in 400–1200 words. Don't repeat "
-                "the topic title as a heading; the page already shows it. Build "
-                "intuition before formalism, include a worked example where the subject has them, "
-                "and point out the usual mistakes. Assume the student knows the earlier topics, "
-                "not the later ones.\n"
-                "- key_points: 3–7 one-line takeaways.\n"
+                "- lesson_md: teach the topic as a good tutor would, as concisely as it allows: "
+                "usually 350–900 words. Build intuition before formalism, include a worked example "
+                "where the subject has them, and point out the usual mistakes. Assume the student "
+                f"knows the earlier topics, not the later ones. {LESSON_SHAPE}\n"
+                "- key_points: 3–7 takeaways, each one short sentence.\n"
                 "- flashcards: 6–15 cards for active recall. One fact per card; the front is a "
                 "question, never a bare term. Cover definitions, formulas, and the why. source is "
                 "the number of the S-id it comes from.\n"
@@ -411,14 +444,32 @@ class Tutor:
                 "and practice questions:\n- " + "\n- ".join(have["questions"]) + "\n\n"
                 f"New material on it has been added: {', '.join(f'S{s}' for s in sources)}. Write only "
                 "what's new:\n"
-                "- lesson_md: a section to append to the lesson, starting with a ## heading, 200–800 "
-                "words, teaching what the new material adds.\n"
+                "- lesson_md: a section to append to the lesson, starting with a ## heading, 150–600 "
+                "words, teaching what the new material adds. Short paragraphs of one idea each; use "
+                "### subheadings or lists where it helps.\n"
                 "- key_points: 1–4 new takeaways.\n"
                 "- flashcards: 3–10 cards for the new content, none repeating the existing ones.\n"
                 "- questions: 2–5 new exam-style questions (mcq with exactly 4 options, or short)."
             )),
             schema=TOPIC_SCHEMA,
         )
+
+    def restyle(self, subject: str, topic: dict, level: int) -> str:
+        """The topic's lesson rewritten at another level of the dial. Works from the lesson
+        itself, so it's quick and stays consistent with the cards and questions."""
+        name, style = LEVELS[level]
+        result = self._call(
+            prompt=(
+                f"Subject: {subject}\nTopic: {topic['title']} ({topic['summary']})\n\n"
+                f"<lesson>\n{topic['lesson_md']}\n</lesson>\n\n"
+                f"Rewrite this lesson at the \"{name}\" level: {style}\n\n"
+                "Cover the same ideas, keep every formula and result correct, and keep the notation "
+                "and examples where they suit the level. Standard background is fine where the level "
+                f"needs more than the lesson says, but never contradict it. {LESSON_SHAPE}"
+            ),
+            schema=RESTYLE_SCHEMA,
+        )
+        return result["lesson_md"]
 
     def transcribe(self, filename: str, images: list[bytes], pages: list[int]) -> dict[int, str]:
         """Read page images (PNG) that had no usable text layer. Returns {original page: text}."""
@@ -440,7 +491,8 @@ class Tutor:
         return out
 
     def chat(
-        self, subject: str, material: str, topic: dict | None, history: list[dict], message: str
+        self, subject: str, material: str, topic: dict | None, history: list[dict], message: str,
+        level: int = STANDARD,
     ) -> Iterator[str]:
         """Stream the tutor's reply, a piece of text at a time."""
         focus = (
@@ -450,10 +502,11 @@ class Tutor:
         )
         intro = (
             f"Subject: {subject}\n\nYou are now the student's tutor in a chat. {focus}\n\n"
+            f"Pitch explanations at the \"{LEVELS[level][0]}\" level: {LEVELS[level][1]} "
             "Answer from the material. Cite where things come from in parentheses using the labels in "
             "the material, like (Week 3.pdf, p.12). If something isn't in the material, say so before "
             "answering from general knowledge. Keep replies short and conversational unless asked for "
-            "depth. If the student asks you to quiz them or says they don't get something, teach "
+            "depth, in short paragraphs or a list, never one long block. If the student asks you to quiz them or says they don't get something, teach "
             "Socratically: one question at a time, and let them try before you explain."
         )
         # Material first and unchanged, so the prefix cache serves it on every message.
@@ -495,7 +548,7 @@ class Tutor:
                 f"<student_answer>{answer}</student_answer>\n\n"
                 "Give score from 0 (wrong or blank) to 1 (fully correct); give partial credit for "
                 "correct method with a slip. Accept any correct answer, not only the model one. "
-                "In feedback, speak to the student in 1–4 sentences: what was right, what was "
+                "In feedback, speak to the student in 1–4 short sentences: what was right, what was "
                 "missing or wrong, and how to fix it."
             ),
             schema=MARK_SCHEMA,

@@ -85,7 +85,12 @@ class FakeTutor:
         assert len(images) == len(pages)
         return {p: f"Diagram on page {p} of {filename}" for p in pages}
 
-    def chat(self, subject, material, topic, history, message):
+    def restyle(self, subject, topic, level):
+        self.restyle_calls = getattr(self, "restyle_calls", 0) + 1
+        return f"Level {level}: {topic['lesson_md']}"
+
+    def chat(self, subject, material, topic, history, message, level=3):
+        self.chat_level = level
         self.chat_args = (topic["title"] if topic else None, [m["content"] for m in history], message)
         yield "You asked: "
         yield message

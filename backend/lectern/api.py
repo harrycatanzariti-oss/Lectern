@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import builder, db, srs
-from .ai import AIError, Tutor, material_text
+from .ai import LEVELS, STANDARD, AIError, Tutor, material_text
 from .extract import SUPPORTED, UnsupportedFile, extract
 
 logging.basicConfig(level=logging.INFO)
@@ -375,6 +375,35 @@ def get_topic(topic_id: int):
     return t
 
 
+@app.get("/api/topics/{topic_id}/lesson")
+def lesson_at_level(topic_id: int, level: int = STANDARD):
+    """The lesson at one level of the dial: the built lesson at the standard level, otherwise
+    a rewrite of it, written the first time it's asked for and kept."""
+    if level not in LEVELS:
+        raise HTTPException(422, f"level must be {min(LEVELS)}–{max(LEVELS)}.")
+    with db.tx() as conn:
+        t = _get(conn, "SELECT t.*, s.name AS subject FROM topics t JOIN subjects s ON s.id = t.subject_id "
+                       "WHERE t.id=?", topic_id)
+        if level == STANDARD or not t["lesson_md"].strip():
+            return {"level": level, "lesson_md": t["lesson_md"]}
+        base = hashlib.sha256(t["lesson_md"].encode()).hexdigest()
+        kept = conn.execute(
+            "SELECT lesson_md FROM lesson_versions WHERE topic_id=? AND level=? AND base=?", (topic_id, level, base)
+        ).fetchone()
+    if kept:
+        return {"level": level, "lesson_md": kept[0]}
+    try:
+        lesson = tutor().restyle(t["subject"], t, level)
+    except AIError as e:
+        raise HTTPException(503, str(e))
+    with db.tx() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO lesson_versions (topic_id, level, base, lesson_md) VALUES (?,?,?,?)",
+            (topic_id, level, base, lesson),
+        )
+    return {"level": level, "lesson_md": lesson}
+
+
 @app.post("/api/topics/{topic_id}/complete")
 def complete_topic(topic_id: int):
     with db.tx() as conn:
@@ -551,6 +580,7 @@ def clear_chat(subject_id: int, topic_id: int | None = None):
 class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     topic_id: int | None = None
+    level: int = Field(STANDARD, ge=min(LEVELS), le=max(LEVELS))  # the lesson dial's setting
 
 
 @app.post("/api/subjects/{subject_id}/chat")
@@ -575,7 +605,7 @@ def chat(subject_id: int, body: ChatIn):
     def stream():
         reply = []
         try:
-            for piece in tutor().chat(subject["name"], material, topic, history, body.message):
+            for piece in tutor().chat(subject["name"], material, topic, history, body.message, body.level):
                 reply.append(piece)
                 yield json.dumps({"text": piece}) + "\n"
         except AIError as e:
