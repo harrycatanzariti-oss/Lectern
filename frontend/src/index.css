@@ -1,0 +1,70 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+@theme {
+  --color-brand: #4f46e5;
+  --color-brand-hover: #6366f1;
+  --color-brand-deep: #3730a3;
+  --color-brand-50: #eef2ff;
+  --color-brand-100: #e0e7ff;
+  --color-brand-200: #c7d2fe;
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background-color: var(--color-neutral-50);
+  color: var(--color-neutral-900);
+}
+
+/* Dark mode flips the palette rather than adding dark: variants everywhere. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-white: #12151c;
+  --color-neutral-50: #0b0d12;
+  --color-neutral-100: #1a1e27;
+  --color-neutral-200: #252a35;
+  --color-neutral-300: #363c49;
+  --color-neutral-400: #6b7280;
+  --color-neutral-500: #8e95a3;
+  --color-neutral-600: #aab0bc;
+  --color-neutral-700: #c7ccd5;
+  --color-neutral-800: #dde1e8;
+  --color-neutral-900: #eceef2;
+  --color-brand-deep: #a5b4fc;
+  --color-brand-50: #1a1c3a;
+  --color-brand-100: #22255080;
+  --color-brand-200: #303580;
+  --color-emerald-50: #0d2620;
+  --color-emerald-700: #6ee7b7;
+  --color-rose-50: #2a1419;
+  --color-rose-700: #fda4af;
+  --color-amber-50: #2a2010;
+  --color-amber-800: #fcd34d;
+}
+
+/* Lesson typography */
+.prose { line-height: 1.7; }
+.prose h1 { font-size: 1.6rem; font-weight: 700; margin: 1.6rem 0 0.8rem; }
+.prose h2 { font-size: 1.3rem; font-weight: 700; margin: 1.6rem 0 0.6rem; }
+.prose h3 { font-size: 1.1rem; font-weight: 600; margin: 1.2rem 0 0.5rem; }
+.prose p, .prose ul, .prose ol, .prose pre, .prose table, .prose blockquote { margin: 0.8rem 0; }
+.prose ul { list-style: disc; padding-left: 1.4rem; }
+.prose ol { list-style: decimal; padding-left: 1.4rem; }
+.prose li { margin: 0.25rem 0; }
+.prose code { background: var(--color-neutral-100); padding: 0.1rem 0.35rem; border-radius: 0.3rem; font-size: 0.9em; }
+.prose pre { background: var(--color-neutral-100); padding: 0.9rem 1rem; border-radius: 0.6rem; overflow-x: auto; }
+.prose pre code { background: none; padding: 0; }
+.prose blockquote { border-left: 3px solid var(--color-brand-200); padding-left: 1rem; color: var(--color-neutral-600); }
+.prose table { border-collapse: collapse; display: block; overflow-x: auto; }
+.prose th, .prose td { border: 1px solid var(--color-neutral-200); padding: 0.4rem 0.7rem; text-align: left; }
+.prose a { color: var(--color-brand-deep); text-decoration: underline; }
+.prose.inline > :first-child { margin-top: 0; }
+.prose.inline > :last-child { margin-bottom: 0; }
+.prose .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.2rem 0; }
+
+.flip { perspective: 1400px; }
+.flip-inner { transition: transform 0.45s; transform-style: preserve-3d; position: relative; }
+.flip-inner.flipped { transform: rotateY(180deg); }
+.flip-face { backface-visibility: hidden; }
+.flip-back { transform: rotateY(180deg); position: absolute; inset: 0; }
+@media (prefers-reduced-motion: reduce) { .flip-inner { transition: none; } }
