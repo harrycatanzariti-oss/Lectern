@@ -650,6 +650,110 @@ def submit_exam(subject_id: int, body: ExamIn):
     }
 
 
+# ---------- export for a Claude Project ----------
+
+def _slug(name: str) -> str:
+    return "".join(c if c.isalnum() else "-" for c in name.lower()).strip("-") or "subject"
+
+
+@app.get("/api/subjects/{subject_id}/export")
+def export(subject_id: int, material: bool = False):
+    """One Markdown file with the course, your progress, and optionally the source text,
+    to upload to a Claude Project's knowledge."""
+    with db.tx() as conn:
+        subject = _get(conn, "SELECT * FROM subjects WHERE id=?", subject_id)
+        topics = db.rows(conn.execute(
+            "SELECT * FROM topics WHERE subject_id=? AND status='ready' ORDER BY position", (subject_id,)
+        ))
+        mastery = topic_mastery(conn, [t["id"] for t in topics])
+        cards = db.rows(conn.execute(
+            "SELECT topic_id, front, back, reps, lapses, due_at FROM cards WHERE subject_id=? ORDER BY id", (subject_id,)
+        ))
+        questions = db.rows(conn.execute("SELECT * FROM questions WHERE subject_id=? ORDER BY id", (subject_id,)))
+        misses = db.rows(conn.execute(
+            """SELECT q.prompt, a.answer, a.score, a.feedback, t.title topic FROM attempts a
+               JOIN questions q ON q.id=a.question_id JOIN topics t ON t.id=a.topic_id
+               WHERE t.subject_id=? AND a.score < 1 AND a.id IN (SELECT MAX(id) FROM attempts GROUP BY question_id)
+               ORDER BY a.id DESC LIMIT 25""",
+            (subject_id,),
+        ))
+        chunks = db.rows(conn.execute(
+            "SELECT label, text FROM chunks WHERE subject_id=? ORDER BY document_id, idx", (subject_id,)
+        )) if material else []
+        files = [r[0] for r in conn.execute("SELECT filename FROM documents WHERE subject_id=? ORDER BY id", (subject_id,))]
+
+    out = [
+        f"# {subject['name']}: study pack",
+        "",
+        f"Exported from Lectern on {srs.now():%d %B %Y}. Built from: {', '.join(files) or 'no files'}.",
+        "",
+        "> **For Claude:** this file is a student's course for this subject, their progress, and "
+        "the mistakes they've made recently. Act as their tutor. Teach in the course's order, "
+        "focus on topics marked weak, and when quizzing them, use the flashcards and practice "
+        "questions here as a guide. "
+        + ("The source material is at the end; cite its labels (e.g. \"Week 3.pdf, p.12\") when you use it."
+           if material else "Their original slides and textbook may also be in this project; cite them by file and page."),
+        "",
+        "## Progress",
+        "",
+        "| # | Topic | Mastery | Lesson read | Practice answered |",
+        "|---|---|---|---|---|",
+    ]
+    for t in topics:
+        m = mastery[t["id"]]
+        flag = " (weak)" if (t["lesson_done"] or m["attempted"]) and m["mastery"] < 0.5 else ""
+        out.append(
+            f"| {t['position'] + 1} | {t['title']}{flag} | {round(m['mastery'] * 100)}% | "
+            f"{'yes' if t['lesson_done'] else 'no'} | {m['attempted']}/{m['questions']} |"
+        )
+    hard = [c for c in cards if c["lapses"] >= 2]
+    if hard:
+        out += ["", "**Flashcards they keep forgetting:**", ""]
+        out += [f"- {c['front']} → {c['back']}" for c in hard[:20]]
+    if misses:
+        out += ["", "**Recent wrong or partly-right answers:**", ""]
+        for m in misses:
+            out.append(f"- [{m['topic']}] {m['prompt']}\n  - Their answer: {m['answer'] or '(blank)'} "
+                       f"({round(m['score'] * 100)}%). {m['feedback']}")
+
+    out += ["", "## Course", ""]
+    for t in topics:
+        out += [f"### {t['position'] + 1}. {t['title']}", "", f"*{t['summary']}*", ""]
+        if t["sources"]:
+            out += [f"Sources: {'; '.join(t['sources'])}", ""]
+        out += [t["lesson_md"].strip(), ""]
+        if t["key_points"]:
+            out += ["**Key points**", ""] + [f"- {p}" for p in t["key_points"]] + [""]
+        tc = [c for c in cards if c["topic_id"] == t["id"]]
+        if tc:
+            out += ["**Flashcards**", ""] + [f"- Q: {c['front']}\n  A: {c['back']}" for c in tc] + [""]
+        tq = [q for q in questions if q["topic_id"] == t["id"]]
+        if tq:
+            out += ["**Practice questions**", ""]
+            for i, q in enumerate(tq, 1):
+                out.append(f"{i}. {q['prompt']}")
+                for j, o in enumerate(q["options"]):
+                    out.append(f"   - {chr(65 + j)}. {o}")
+                answer = (f"{chr(65 + q['answer_index'])}. {q['options'][q['answer_index']]}"
+                          if q["kind"] == "mcq" else q["model_answer"])
+                out.append(f"   - *Answer:* {answer}")
+                if q["explanation"]:
+                    out.append(f"   - *Why:* {q['explanation']}")
+            out.append("")
+
+    if material:
+        out += ["## Source material", ""]
+        for c in chunks:
+            out += [f"### {c['label']}", "", c["text"], ""]
+
+    name = f"{_slug(subject['name'])}{'-with-material' if material else ''}.md"
+    return Response(
+        "\n".join(out),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
 # ---------- frontend ----------
 
 DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"

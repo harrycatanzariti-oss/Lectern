@@ -43,6 +43,19 @@ It borrows from two other projects:
    score on each of its questions. A topic counts as mastered at 80%. The home page has a
    *Review all due* session that covers every subject at once.
 
+### Using it in a Claude Project
+
+Each subject page has **Use in a Claude Project**. It downloads one Markdown file with:
+
+- the course in order: lessons, key points, flashcards, practice questions and answers
+- your mastery per topic, with weak topics flagged
+- flashcards you keep forgetting, and your recent wrong answers
+- optionally, the extracted text of all your files
+
+Upload it to a Project's knowledge on claude.ai. Instructions at the top of the file tell
+Claude to tutor from it. Export again to refresh it. Claude Projects have no public API
+for adding files, so this step is manual.
+
 ### Adding material later
 
 Upload the next week's slides and click **Update course**. Claude fits the new material

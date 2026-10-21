@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowRight, Check, ClipboardList, FileText, Layers, MessageCircle, PenLine, RefreshCw, Trash2, Upload } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ClipboardList, Download, FileText, Layers, MessageCircle, PenLine, RefreshCw, Trash2, Upload } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { TutorChat } from "../components/TutorChat";
@@ -335,6 +335,27 @@ export default function SubjectPage() {
         )}
         {subject.documents.length > 0 && <BuildPanel subject={subject} onStarted={load} />}
       </section>
+
+      {hasCourse && subject.build_status !== "building" && (
+        <section className={`${card} space-y-3 p-5`}>
+          <h2 className="font-semibold">Use in a Claude Project</h2>
+          <p className="text-sm text-neutral-500">
+            Download this subject as one file: the course, every flashcard and question, and where you're weak. Upload it
+            to a Project's knowledge on claude.ai and Claude can tutor you from it. Export again whenever you want it up to date.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <a href={`/api/subjects/${id}/export`} download className={btnGhost}>
+              <Download size={15} /> Course and progress
+            </a>
+            <a href={`/api/subjects/${id}/export?material=true`} download className={btnGhost}>
+              <Download size={15} /> Also include the text of my files
+            </a>
+          </div>
+          <p className="text-xs text-neutral-400">
+            Including your files' text helps if you don't upload the PDFs to the Project too. Leave it out if you do.
+          </p>
+        </section>
+      )}
 
       <button onClick={remove} className="text-sm text-neutral-400 hover:text-rose-700">
         Delete subject

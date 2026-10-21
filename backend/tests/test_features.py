@@ -190,3 +190,27 @@ def test_password(client, monkeypatch):
     assert client.post("/api/login", json={"password": "nope"}).status_code == 401
     assert client.post("/api/login", json={"password": "hunter2"}).status_code == 200
     assert client.get("/api/subjects").status_code == 200
+
+
+def test_export_for_claude_project(client):
+    sid = make_subject(client, "MATH1131 Calculus")
+    upload(client, sid)
+    build(client, sid)
+    tid = topics(client, sid)[0]["id"]
+    client.post(f"/api/topics/{tid}/complete")
+    q = client.get(f"/api/subjects/{sid}/practice").json()["questions"][0]
+    client.post(f"/api/questions/{q['id']}/answer", json={"answer": "0" if q["kind"] == "mcq" else "no idea"})
+
+    r = client.get(f"/api/subjects/{sid}/export")
+    assert r.headers["content-disposition"] == 'attachment; filename="math1131-calculus.md"'
+    md = r.text
+    assert md.startswith("# MATH1131 Calculus: study pack")
+    assert "| 1 | Limits (weak) | " in md and "| 2 | Derivatives | 0% | no | 0/3 |" in md
+    assert "Recent wrong or partly-right answers" in md
+    assert "### 1. Limits" in md and "- Q: Limits Q0?\n  A: A0" in md
+    assert "*Answer:* C. c" in md
+    assert "## Source material" not in md
+
+    full = client.get(f"/api/subjects/{sid}/export?material=true")
+    assert "with-material" in full.headers["content-disposition"]
+    assert "### notes.txt" in full.text and "Derivatives are slopes." in full.text
