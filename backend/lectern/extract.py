@@ -3,18 +3,28 @@ from __future__ import annotations
 
 import io
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePath
 
 SUPPORTED = (".pdf", ".pptx", ".txt", ".md")
 # Plain-text files have no pages, so split them into page-sized pieces.
 TEXT_PAGE_CHARS = 3000
+# A PDF page with less text than this is mostly a picture (a scan, a diagram, a slide
+# exported as an image), so Claude reads the page image during the build instead.
+IMAGE_PAGE_CHARS = 40
 
 
 @dataclass
 class Chunk:
     label: str
     text: str
+    page: int = 0
+
+
+@dataclass
+class Extracted:
+    chunks: list[Chunk]
+    image_pages: list[int] = field(default_factory=list)  # 1-based PDF pages for Claude to read
 
 
 class UnsupportedFile(ValueError):
@@ -28,30 +38,49 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
-def extract(filename: str, data: bytes) -> list[Chunk]:
+def extract(filename: str, data: bytes) -> Extracted:
     ext = PurePath(filename).suffix.lower()
     if ext == ".pdf":
         return _pdf(filename, data)
     if ext == ".pptx":
-        return _pptx(filename, data)
+        return Extracted(_pptx(filename, data))
     if ext in (".txt", ".md"):
-        return _text(filename, data.decode("utf-8", errors="replace"))
+        return Extracted(_text(filename, data.decode("utf-8", errors="replace")))
     raise UnsupportedFile(f"{filename}: only PDF, PowerPoint (.pptx), .txt and .md files are supported")
 
 
-def _pdf(filename: str, data: bytes) -> list[Chunk]:
+def pdf_label(filename: str, page: int) -> str:
+    return f"{filename}, p.{page}"
+
+
+def _pdf(filename: str, data: bytes) -> Extracted:
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(data))
-    chunks = []
+    out = Extracted([])
     for i, page in enumerate(reader.pages, start=1):
         try:
             text = _clean(page.extract_text() or "")
         except Exception:
             text = ""
-        if text:
-            chunks.append(Chunk(f"{filename}, p.{i}", text))
-    return chunks
+        if len(text) >= IMAGE_PAGE_CHARS:
+            out.chunks.append(Chunk(pdf_label(filename, i), text, i))
+        else:
+            out.image_pages.append(i)
+    return out
+
+
+def pdf_pages(data: bytes, pages: list[int]) -> bytes:
+    """A new PDF holding just these 1-based pages, to send to Claude."""
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(io.BytesIO(data))
+    writer = PdfWriter()
+    for p in pages:
+        writer.add_page(reader.pages[p - 1])
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
 def _pptx(filename: str, data: bytes) -> list[Chunk]:
@@ -73,7 +102,7 @@ def _pptx(filename: str, data: bytes) -> list[Chunk]:
                 parts.append(f"Speaker notes: {notes}")
         text = _clean("\n".join(parts))
         if text:
-            chunks.append(Chunk(f"{filename}, slide {i}", text))
+            chunks.append(Chunk(f"{filename}, slide {i}", text, i))
     return chunks
 
 
@@ -89,5 +118,5 @@ def _text(filename: str, text: str) -> list[Chunk]:
     if part:
         chunks.append("\n\n".join(part))
     if len(chunks) == 1:
-        return [Chunk(filename, chunks[0])] if chunks[0] else []
-    return [Chunk(f"{filename}, part {i}", c) for i, c in enumerate(chunks, start=1)]
+        return [Chunk(filename, chunks[0], 1)] if chunks[0] else []
+    return [Chunk(f"{filename}, part {i}", c, i) for i, c in enumerate(chunks, start=1)]

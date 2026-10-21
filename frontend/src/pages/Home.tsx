@@ -1,7 +1,7 @@
-import { Plus } from "lucide-react";
+import { Layers, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ErrorNote, MasteryRing, Spinner, btnPrimary, card } from "../components/ui";
+import { ErrorNote, MasteryRing, Spinner, btnGhost, btnPrimary, card } from "../components/ui";
 import { api, type SubjectSummary } from "../lib/api";
 
 export const COLORS = ["#4f46e5", "#0891b2", "#059669", "#d97706", "#dc2626", "#c026d3", "#475569"];
@@ -94,11 +94,18 @@ export default function Home() {
                 : "Nothing due for review. Keep going on your next topic."}
           </p>
         </div>
-        {!adding && (
-          <button className={btnPrimary} onClick={() => setAdding(true)}>
-            <Plus size={16} /> New subject
-          </button>
-        )}
+        <div className="flex gap-2">
+          {due > 0 && (
+            <Link to="/review" className={btnPrimary}>
+              <Layers size={16} /> Review all due ({due})
+            </Link>
+          )}
+          {!adding && (
+            <button className={due > 0 ? btnGhost : btnPrimary} onClick={() => setAdding(true)}>
+              <Plus size={16} /> New subject
+            </button>
+          )}
+        </div>
       </div>
 
       {(adding || subjects.length === 0) && <NewSubject onDone={() => setAdding(false)} />}

@@ -44,6 +44,34 @@ class FakeTutor:
             ],
         }
 
+    def update_outline(self, subject, material, existing, new_files):
+        self.update_calls = getattr(self, "update_calls", 0) + 1
+        ids = [int(part.split("]")[0]) for part in material.split("[S")[1:]]
+        kept = [{"existing_id": t["id"], "title": "renamed?", "summary": "", "sources": ids[-1:], "extend": i == 0}
+                for i, t in enumerate(existing) if t["id"] not in self.drop]
+        return {"topics": kept + [
+            {"existing_id": -1, "title": "Integrals", "summary": "Areas", "sources": ids[-1:], "extend": False},
+        ]}
+
+    drop: set = set()
+
+    def extend_topic(self, subject, material, topic, sources, have):
+        self.extended = (topic["title"], have)
+        return {
+            "lesson_md": "## More\nExtra section.",
+            "key_points": ["extra point"],
+            "flashcards": [{"front": "Extra Q?", "back": "Extra A", "source": sources[0]}],
+            "questions": [],
+        }
+
+    def transcribe(self, filename, pdf, pages):
+        return {p: f"Diagram on page {p} of {filename}" for p in pages}
+
+    def chat(self, subject, material, topic, history, message):
+        self.chat_args = (topic["title"] if topic else None, [m["content"] for m in history], message)
+        yield "You asked: "
+        yield message
+
     def mark(self, question, answer):
         ok = question["model_answer"].lower() in answer.lower()
         return {"score": 1.0 if ok else 0.25, "feedback": "Good." if ok else "Mention the slope."}

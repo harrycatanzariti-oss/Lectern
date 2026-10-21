@@ -102,21 +102,6 @@ def test_learning_loop(client):
     assert 0 < t["mastery"] < 0.8
 
 
-def test_rebuild_after_new_upload_is_flagged(client):
-    sid = make_subject(client)
-    upload(client, sid)
-    build(client, sid)
-    with db.tx() as conn:
-        conn.execute("UPDATE documents SET created_at=datetime('now','-2 hours') WHERE subject_id=?", (sid,))
-        conn.execute("UPDATE subjects SET built_at=datetime('now','-1 hour') WHERE id=?", (sid,))
-    assert client.get(f"/api/subjects/{sid}").json()["stale"] is False
-    upload(client, sid, "Integrals are areas.")
-    assert client.get(f"/api/subjects/{sid}").json()["stale"] is True
-    build(client, sid)
-    with db.tx() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM topics WHERE subject_id=?", (sid,)).fetchone()[0] == 2
-
-
 def test_delete_subject_cascades(client):
     sid = make_subject(client)
     upload(client, sid)

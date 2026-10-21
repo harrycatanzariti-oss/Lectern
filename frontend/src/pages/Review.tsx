@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ErrorNote, Markdown, Spinner, btnPrimary, card } from "../components/ui";
 import { api, type Card } from "../lib/api";
@@ -11,7 +11,9 @@ const GRADES = [
 ];
 
 export default function Review() {
-  const subjectId = Number(useParams().id);
+  // Without a subject in the URL, this is one session across every subject.
+  const { id } = useParams();
+  const subjectId = id ? Number(id) : undefined;
   const [params] = useSearchParams();
   const topicId = params.get("topic") ? Number(params.get("topic")) : undefined;
   const thenPractice = params.get("then") === "practice";
@@ -20,22 +22,26 @@ export default function Review() {
   const [queue, setQueue] = useState<Card[] | null>(null);
   const [flipped, setFlipped] = useState(false);
   const [done, setDone] = useState(0);
+  const grading = useRef(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    api.review(subjectId, topicId).then((r) => setQueue(r.cards), (e) => setError(e.message));
+    (subjectId ? api.review(subjectId, topicId) : api.reviewAll()).then((r) => setQueue(r.cards), (e) => setError(e.message));
   }, [subjectId, topicId]);
 
   const current = queue?.[0];
 
   const grade = useCallback(
     async (g: string) => {
-      if (!current) return;
+      if (!current || grading.current) return;
+      grading.current = true;
       try {
         await api.grade(current.id, g);
       } catch (e) {
         setError((e as Error).message);
         return;
+      } finally {
+        grading.current = false;
       }
       setFlipped(false);
       setDone((n) => n + 1);
@@ -63,7 +69,7 @@ export default function Review() {
   if (error) return <ErrorNote error={error} />;
   if (!queue) return <Spinner />;
 
-  const back = topicId ? `/t/${topicId}` : `/s/${subjectId}`;
+  const back = topicId ? `/t/${topicId}` : subjectId ? `/s/${subjectId}` : "/";
 
   if (!current) {
     return (
@@ -105,7 +111,15 @@ export default function Review() {
             className={`flip-face ${card} flex min-h-72 w-full flex-col justify-between p-8 text-left`}
             aria-label="Show answer"
           >
-            <span className="text-xs font-medium uppercase tracking-wide text-neutral-400">{current.topic}</span>
+            <span className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-neutral-400">
+              {current.subject && (
+                <>
+                  <span className="h-2 w-2 rounded-full" style={{ background: current.color }} />
+                  {current.subject} ·
+                </>
+              )}
+              {current.topic}
+            </span>
             <div className="py-6 text-xl font-medium">
               <Markdown>{current.front}</Markdown>
             </div>

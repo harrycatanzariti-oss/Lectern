@@ -1,0 +1,17 @@
+# Render blueprint: one web service with a persistent disk for the database and uploads.
+# The disk needs a paid instance type; on the free tier data is lost on every deploy.
+services:
+  - type: web
+    name: lectern
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/session
+    disk:
+      name: lectern-data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: LECTERN_PASSWORD
+        sync: false

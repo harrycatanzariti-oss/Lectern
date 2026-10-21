@@ -1,17 +1,22 @@
 """HTTP API for the web app."""
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import builder, db, srs
-from .ai import AIError, Tutor
+from .ai import AIError, Tutor, material_text
 from .extract import SUPPORTED, UnsupportedFile, extract
 
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +24,6 @@ logging.basicConfig(level=logging.INFO)
 MASTERED = 0.8
 NEW_CARDS_PER_SESSION = 15
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
-
 
 
 @asynccontextmanager
@@ -43,6 +47,45 @@ def set_tutor(t: Tutor) -> None:
     """Tests swap in a fake tutor."""
     global _tutor
     _tutor = t
+
+
+# ---------- optional password ----------
+# Set LECTERN_PASSWORD when the app is reachable from the internet; otherwise anyone who
+# finds it can spend your Claude credit.
+PASSWORD = os.environ.get("LECTERN_PASSWORD", "")
+COOKIE = "lectern_auth"
+
+
+def _token() -> str:
+    return hmac.new(PASSWORD.encode(), b"lectern", hashlib.sha256).hexdigest()
+
+
+@app.middleware("http")
+async def require_password(request: Request, call_next):
+    path = request.url.path
+    if PASSWORD and path.startswith("/api/") and path not in ("/api/login", "/api/session"):
+        if not hmac.compare_digest(request.cookies.get(COOKIE, ""), _token()):
+            return JSONResponse({"detail": "Sign in first."}, status_code=401)
+    return await call_next(request)
+
+
+class LoginIn(BaseModel):
+    password: str
+
+
+@app.get("/api/session")
+def session(request: Request):
+    ok = not PASSWORD or hmac.compare_digest(request.cookies.get(COOKIE, ""), _token())
+    return {"signed_in": ok, "password_required": bool(PASSWORD)}
+
+
+@app.post("/api/login")
+def login(body: LoginIn, response: Response):
+    if not PASSWORD or not hmac.compare_digest(body.password, PASSWORD):
+        raise HTTPException(401, "Wrong password.")
+    response.set_cookie(COOKIE, _token(), httponly=True, samesite="lax", max_age=60 * 60 * 24 * 90,
+                        secure=os.environ.get("LECTERN_SECURE_COOKIE", "1") == "1")
+    return {"ok": True}
 
 
 def _get(conn, sql: str, *args) -> dict:
@@ -185,10 +228,11 @@ def get_subject(subject_id: int):
         s["topics"] = topics
         s.update(_due_counts(conn, subject_id).get(subject_id, {"due": 0, "new": 0}))
         s["next"] = _next_step(topics, s["due"])
-        # Uploads newer than the last build aren't in the course yet.
-        s["stale"] = bool(s["built_at"]) and conn.execute(
-            "SELECT COUNT(*) FROM documents WHERE subject_id=? AND created_at > ?", (subject_id, s["built_at"])
+        # Files uploaded since the course was built aren't in it yet.
+        s["stale"] = bool(topics) and conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE subject_id=? AND in_course=0", (subject_id,)
         ).fetchone()[0] > 0
+        s["failed_topics"] = sum(1 for t in topics if t["status"] == "failed")
     return s
 
 
@@ -221,23 +265,35 @@ async def upload(subject_id: int, files: list[UploadFile] = File(...), kind: str
             errors.append(f"{name}: larger than 200 MB")
             continue
         try:
-            chunks = extract(name, data)
+            got = extract(name, data)
         except UnsupportedFile as e:
             errors.append(str(e))
             continue
         except Exception:
             errors.append(f"{name}: couldn't read this file. Is it damaged or password-protected?")
             continue
-        warning = "" if chunks else "No text found. If this is a scanned PDF, run it through OCR first."
+        chunks = got.chunks
+        warning = ""
+        if got.image_pages:
+            n = len(got.image_pages)
+            warning = f"{n} page{'s are' if n != 1 else ' is'} mostly images. Claude will read {'them' if n != 1 else 'it'} when you build."
+        elif not chunks:
+            warning = "No text found in this file."
         with db.tx() as conn:
             doc_id = conn.execute(
-                "INSERT INTO documents (subject_id, filename, kind, units, chars, warning) VALUES (?,?,?,?,?,?)",
-                (subject_id, name, kind, len(chunks), sum(len(c.text) for c in chunks), warning),
+                "INSERT INTO documents (subject_id, filename, kind, units, chars, warning, image_pages) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (subject_id, name, kind, len(chunks), sum(len(c.text) for c in chunks), warning,
+                 json.dumps(got.image_pages)),
             ).lastrowid
             conn.executemany(
                 "INSERT INTO chunks (document_id, subject_id, idx, label, text) VALUES (?,?,?,?,?)",
-                [(doc_id, subject_id, i, c.label, c.text) for i, c in enumerate(chunks)],
+                [(doc_id, subject_id, c.page, c.label, c.text) for c in chunks],
             )
+            if got.image_pages:
+                # Kept so Claude can look at the image pages during the build.
+                db.UPLOADS.mkdir(parents=True, exist_ok=True)
+                (db.UPLOADS / f"{doc_id}.pdf").write_bytes(data)
             conn.execute(
                 "UPDATE subjects SET build_status='ready_to_build' WHERE id=? AND build_status IN ('empty')",
                 (subject_id,),
@@ -253,15 +309,23 @@ def delete_document(document_id: int):
     with db.tx() as conn:
         _get(conn, "SELECT id FROM documents WHERE id=?", document_id)
         conn.execute("DELETE FROM documents WHERE id=?", (document_id,))
+    (db.UPLOADS / f"{document_id}.pdf").unlink(missing_ok=True)
+
+
+class BuildIn(BaseModel):
+    fresh: bool = False  # True: replan from scratch and reset progress
 
 
 @app.post("/api/subjects/{subject_id}/build", status_code=202)
-def build(subject_id: int):
+def build(subject_id: int, body: BuildIn | None = None):
     with db.tx() as conn:
         _get(conn, "SELECT id FROM subjects WHERE id=?", subject_id)
-        if not conn.execute("SELECT COUNT(*) FROM chunks WHERE subject_id=?", (subject_id,)).fetchone()[0]:
-            raise HTTPException(422, "Upload some slides or a textbook with readable text first.")
-    if not builder.start(subject_id, tutor()):
+        readable = conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE subject_id=? AND (units > 0 OR image_pages != '[]')", (subject_id,)
+        ).fetchone()[0]
+        if not readable:
+            raise HTTPException(422, "Upload some slides or a textbook with readable content first.")
+    if not builder.start(subject_id, tutor(), fresh=bool(body and body.fresh)):
         raise HTTPException(409, "This subject is already being built.")
     return {"ok": True}
 
@@ -369,37 +433,220 @@ class AnswerIn(BaseModel):
     answer: str = Field(max_length=8000)
 
 
+def _solution(q: dict) -> dict:
+    return {
+        "answer_index": q["answer_index"],
+        "model_answer": q["model_answer"],
+        "explanation": q["explanation"],
+    }
+
+
+def _mark(q: dict, answer: str) -> dict:
+    if q["kind"] == "mcq":
+        try:
+            picked = int(answer)
+        except ValueError:
+            if not answer.strip():
+                return {"score": 0.0, "feedback": "No answer given."}
+            raise HTTPException(422, "Answer a multiple-choice question with the option's index.")
+        if picked == q["answer_index"]:
+            return {"score": 1.0, "feedback": "Correct."}
+        return {"score": 0.0, "feedback": f"Not quite. The answer is: {q['options'][q['answer_index']]}"}
+    if not answer.strip():
+        return {"score": 0.0, "feedback": "No answer given."}
+    try:
+        return tutor().mark(q, answer)
+    except AIError as e:
+        raise HTTPException(503, str(e))
+
+
 @app.post("/api/questions/{question_id}/answer")
 def answer_question(question_id: int, body: AnswerIn):
     with db.tx() as conn:
         q = _get(conn, "SELECT * FROM questions WHERE id=?", question_id)
-    if q["kind"] == "mcq":
-        try:
-            picked = int(body.answer)
-        except ValueError:
-            raise HTTPException(422, "Answer a multiple-choice question with the option's index.")
-        score = 1.0 if picked == q["answer_index"] else 0.0
-        feedback = "Correct." if score else f"Not quite. The answer is: {q['options'][q['answer_index']]}"
-    else:
-        if not body.answer.strip():
-            score, feedback = 0.0, "No answer given."
-        else:
-            try:
-                marked = tutor().mark(q, body.answer)
-            except AIError as e:
-                raise HTTPException(503, str(e))
-            score, feedback = marked["score"], marked["feedback"]
+    m = _mark(q, body.answer)
     with db.tx() as conn:
         conn.execute(
             "INSERT INTO attempts (question_id, topic_id, score, answer, feedback) VALUES (?,?,?,?,?)",
-            (question_id, q["topic_id"], score, body.answer, feedback),
+            (question_id, q["topic_id"], m["score"], body.answer, m["feedback"]),
         )
+    return {**m, **_solution(q)}
+
+
+# ---------- study everything that's due ----------
+
+@app.get("/api/review")
+def review_all():
+    """Due cards from every subject, most overdue first, then a few new cards from each."""
+    cols = "c.id, c.front, c.back, c.source, c.reps, c.due_at, c.topic_id, t.title topic, s.name subject, s.color"
+    join = "FROM cards c JOIN topics t ON t.id=c.topic_id JOIN subjects s ON s.id=c.subject_id"
+    with db.tx() as conn:
+        due = db.rows(conn.execute(
+            f"SELECT {cols} {join} WHERE c.due_at IS NOT NULL AND c.due_at <= ? ORDER BY c.due_at",
+            (srs.iso(srs.now()),),
+        ))
+        new = []
+        for (sid,) in conn.execute("SELECT id FROM subjects ORDER BY id"):
+            new += db.rows(conn.execute(
+                f"SELECT {cols} {join} WHERE c.subject_id=? AND c.due_at IS NULL AND t.lesson_done=1 "
+                "ORDER BY t.position, c.id LIMIT ?",
+                (sid, NEW_CARDS_PER_SESSION // 3 or 1),
+            ))
+    return {"cards": due + new, "due": len(due), "new": len(new)}
+
+
+# ---------- tutor chat ----------
+
+CHAT_HISTORY = 40  # messages of the thread sent back to Claude
+
+
+def _thread(conn, subject_id: int, topic_id: int | None) -> list[dict]:
+    return db.rows(conn.execute(
+        "SELECT id, role, content, created_at FROM chat_messages WHERE subject_id=? AND topic_id IS ? ORDER BY id",
+        (subject_id, topic_id),
+    ))
+
+
+@app.get("/api/subjects/{subject_id}/chat")
+def get_chat(subject_id: int, topic_id: int | None = None):
+    with db.tx() as conn:
+        _get(conn, "SELECT id FROM subjects WHERE id=?", subject_id)
+        return {"messages": _thread(conn, subject_id, topic_id)}
+
+
+@app.delete("/api/subjects/{subject_id}/chat", status_code=204)
+def clear_chat(subject_id: int, topic_id: int | None = None):
+    with db.tx() as conn:
+        conn.execute("DELETE FROM chat_messages WHERE subject_id=? AND topic_id IS ?", (subject_id, topic_id))
+
+
+class ChatIn(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+    topic_id: int | None = None
+
+
+@app.post("/api/subjects/{subject_id}/chat")
+def chat(subject_id: int, body: ChatIn):
+    """Stream the tutor's reply as newline-delimited JSON: {"text": …} pieces, then {"done": true}."""
+    with db.tx() as conn:
+        subject = _get(conn, "SELECT * FROM subjects WHERE id=?", subject_id)
+        topic = None
+        if body.topic_id is not None:
+            topic = _get(conn, "SELECT * FROM topics WHERE id=? AND subject_id=?", body.topic_id, subject_id)
+        chunks = db.rows(conn.execute(
+            "SELECT id, label, text FROM chunks WHERE subject_id=? ORDER BY document_id, idx", (subject_id,)
+        ))
+        history = _thread(conn, subject_id, body.topic_id)[-CHAT_HISTORY:]
+        # The thread must open with the student; drop a leading reply left by trimming.
+        while history and history[0]["role"] != "user":
+            history.pop(0)
+    if not chunks:
+        raise HTTPException(422, "Upload some material first.")
+    material = material_text(chunks)
+
+    def stream():
+        reply = []
+        try:
+            for piece in tutor().chat(subject["name"], material, topic, history, body.message):
+                reply.append(piece)
+                yield json.dumps({"text": piece}) + "\n"
+        except AIError as e:
+            yield json.dumps({"error": str(e)}) + "\n"
+            return
+        except Exception:
+            logging.exception("chat failed")
+            yield json.dumps({"error": "The tutor hit a problem. Try again."}) + "\n"
+            return
+        with db.tx() as conn:
+            conn.executemany(
+                "INSERT INTO chat_messages (subject_id, topic_id, role, content) VALUES (?,?,?,?)",
+                [(subject_id, body.topic_id, "user", body.message),
+                 (subject_id, body.topic_id, "assistant", "".join(reply))],
+            )
+        yield json.dumps({"done": True}) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+# ---------- mock exams ----------
+
+@app.get("/api/subjects/{subject_id}/exam")
+def exam(subject_id: int, n: int = 10, topics: str = ""):
+    """A mixed exam across the chosen topics (default: all), questions spread evenly over them."""
+    n = max(1, min(n, 40))
+    chosen = [int(t) for t in topics.split(",") if t.strip().isdigit()]
+    with db.tx() as conn:
+        _get(conn, "SELECT id FROM subjects WHERE id=?", subject_id)
+        where, args = "q.subject_id=? AND t.status='ready'", [subject_id]
+        if chosen:
+            where += f" AND q.topic_id IN ({','.join('?' * len(chosen))})"
+            args += chosen
+        qs = db.rows(conn.execute(
+            f"""SELECT q.*, t.title topic, t.position,
+                   (SELECT COUNT(*) FROM attempts a WHERE a.question_id=q.id) tries
+                FROM questions q JOIN topics t ON t.id=q.topic_id WHERE {where}
+                ORDER BY random()""",
+            args,
+        ))
+    # Round-robin across topics, least-practised questions first, so the exam covers the course.
+    by_topic: dict[int, list[dict]] = {}
+    for q in sorted(qs, key=lambda q: q["tries"]):
+        by_topic.setdefault(q["topic_id"], []).append(q)
+    picked: list[dict] = []
+    while len(picked) < n and any(by_topic.values()):
+        for bucket in by_topic.values():
+            if bucket and len(picked) < n:
+                picked.append(bucket.pop(0))
+    picked.sort(key=lambda q: (q["position"], q["kind"] != "mcq"))
+    return {"questions": [_public_question(q) for q in picked]}
+
+
+class ExamAnswer(BaseModel):
+    question_id: int
+    answer: str = Field(max_length=8000)
+
+
+class ExamIn(BaseModel):
+    answers: list[ExamAnswer] = Field(max_length=40)
+
+
+@app.post("/api/subjects/{subject_id}/exam")
+def submit_exam(subject_id: int, body: ExamIn):
+    """Mark every answer (short answers in parallel), record them, and break the score down by topic."""
+    with db.tx() as conn:
+        questions = {}
+        for a in body.answers:
+            q = _get(conn, "SELECT q.*, t.title topic FROM questions q JOIN topics t ON t.id=q.topic_id "
+                           "WHERE q.id=? AND q.subject_id=?", a.question_id, subject_id)
+            questions[a.question_id] = q
+
+    def mark(a: ExamAnswer) -> dict:
+        try:
+            return _mark(questions[a.question_id], a.answer)
+        except HTTPException as e:
+            return {"score": 0.0, "feedback": f"Couldn't be marked: {e.detail}", "unmarked": True}
+
+    with ThreadPoolExecutor(4) as pool:
+        marks = list(pool.map(mark, body.answers))
+
+    results, topics = [], {}
+    with db.tx() as conn:
+        for a, m in zip(body.answers, marks):
+            q = questions[a.question_id]
+            if not m.get("unmarked"):
+                conn.execute(
+                    "INSERT INTO attempts (question_id, topic_id, score, answer, feedback) VALUES (?,?,?,?,?)",
+                    (q["id"], q["topic_id"], m["score"], a.answer, m["feedback"]),
+                )
+            results.append({**_public_question(q), "answer": a.answer, **m, **_solution(q)})
+            t = topics.setdefault(q["topic_id"], {"topic_id": q["topic_id"], "topic": q["topic"], "score": 0.0, "n": 0})
+            t["score"] += m["score"]
+            t["n"] += 1
+    total = sum(m["score"] for m in marks)
     return {
-        "score": score,
-        "feedback": feedback,
-        "answer_index": q["answer_index"],
-        "model_answer": q["model_answer"],
-        "explanation": q["explanation"],
+        "score": round(total / len(marks), 3) if marks else 0.0,
+        "results": results,
+        "topics": sorted(topics.values(), key=lambda t: t["score"] / t["n"]),
     }
 
 

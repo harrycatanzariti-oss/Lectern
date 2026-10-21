@@ -1,6 +1,7 @@
-import { AlertTriangle, ArrowRight, Check, FileText, Layers, PenLine, RefreshCw, Trash2, Upload } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, ClipboardList, FileText, Layers, MessageCircle, PenLine, RefreshCw, Trash2, Upload } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { TutorChat } from "../components/TutorChat";
 import { Bar, ErrorNote, Spinner, btnGhost, btnPrimary, card, masteryLabel } from "../components/ui";
 import { MASTERED, api, type Subject } from "../lib/api";
 
@@ -91,11 +92,11 @@ function BuildPanel({ subject, onStarted }: { subject: Subject; onStarted: () =>
   const building = subject.build_status === "building";
   const hasCourse = subject.topics.length > 0;
 
-  const start = async () => {
-    if (hasCourse && !confirm("Rebuilding writes a fresh course from all your files and resets your flashcard and practice progress for this subject. Continue?")) return;
+  const start = async (fresh: boolean) => {
+    if (fresh && hasCourse && !confirm("Starting over writes a brand-new course from all your files and resets your flashcard and practice progress for this subject. Continue?")) return;
     setError("");
     try {
-      await api.build(subject.id);
+      await api.build(subject.id, fresh);
       onStarted();
     } catch (e) {
       setError((e as Error).message);
@@ -113,7 +114,8 @@ function BuildPanel({ subject, onStarted }: { subject: Subject; onStarted: () =>
       </div>
     );
   }
-  const usable = subject.documents.some((d) => d.units > 0);
+  const usable = subject.documents.some((d) => d.units > 0 || d.image_pages.length > 0);
+  const needsUpdate = subject.stale || subject.failed_topics > 0;
   return (
     <div className="space-y-3">
       {subject.build_status === "failed" && <ErrorNote error={subject.build_message} />}
@@ -122,12 +124,32 @@ function BuildPanel({ subject, onStarted }: { subject: Subject; onStarted: () =>
       )}
       {subject.stale && (
         <p className="flex items-center gap-2 text-sm text-amber-800">
-          <AlertTriangle size={15} /> You've added files since the course was built. Rebuild to include them.
+          <AlertTriangle size={15} /> You've added files since the course was built. Update it to add them; your progress stays.
         </p>
       )}
-      <button className={hasCourse ? btnGhost : btnPrimary} onClick={start} disabled={!usable}>
-        <RefreshCw size={15} /> {hasCourse ? "Rebuild course" : "Build my course"}
-      </button>
+      {!subject.stale && subject.failed_topics > 0 && (
+        <p className="flex items-center gap-2 text-sm text-amber-800">
+          <AlertTriangle size={15} /> {subject.failed_topics} topic{subject.failed_topics === 1 ? "" : "s"} couldn't be written. Update to retry.
+        </p>
+      )}
+      <div className="flex flex-wrap items-center gap-3">
+        {!hasCourse ? (
+          <button className={btnPrimary} onClick={() => start(true)} disabled={!usable}>
+            <RefreshCw size={15} /> Build my course
+          </button>
+        ) : (
+          <>
+            {needsUpdate && (
+              <button className={btnPrimary} onClick={() => start(false)}>
+                <RefreshCw size={15} /> Update course
+              </button>
+            )}
+            <button className="text-sm text-neutral-500 hover:underline" onClick={() => start(true)}>
+              Start over from scratch
+            </button>
+          </>
+        )}
+      </div>
       {error && <ErrorNote error={error} />}
     </div>
   );
@@ -139,6 +161,7 @@ export default function SubjectPage() {
   const [subject, setSubject] = useState<Subject | null>(null);
   const [error, setError] = useState("");
   const [showFiles, setShowFiles] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
 
   const load = useCallback(() => api.subject(id).then(setSubject, (e) => setError(e.message)), [id]);
   useEffect(() => {
@@ -157,7 +180,7 @@ export default function SubjectPage() {
   const ready = subject.topics.filter((t) => t.status === "ready");
   const mastered = ready.filter((t) => t.mastery >= MASTERED).length;
   const hasCourse = ready.length > 0;
-  const filesOpen = showFiles || !hasCourse;
+  const filesOpen = showFiles || !hasCourse || subject.stale;
 
   const remove = async () => {
     if (!confirm(`Delete ${subject.name} and everything in it?`)) return;
@@ -178,6 +201,7 @@ export default function SubjectPage() {
 
   return (
     <div className="space-y-8">
+      {chatOpen && <TutorChat subjectId={id} title={subject.name} onClose={() => setChatOpen(false)} />}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <Link to="/" className="text-sm text-neutral-500 hover:underline">
@@ -199,8 +223,14 @@ export default function SubjectPage() {
               <Layers size={15} /> Flashcards{subject.due ? ` (${subject.due} due)` : ""}
             </Link>
             <Link to={`/s/${id}/practice`} className={btnGhost}>
-              <PenLine size={15} /> Practice questions
+              <PenLine size={15} /> Practice
             </Link>
+            <Link to={`/s/${id}/exam`} className={btnGhost}>
+              <ClipboardList size={15} /> Mock exam
+            </Link>
+            <button onClick={() => setChatOpen(true)} className={btnGhost}>
+              <MessageCircle size={15} /> Ask the tutor
+            </button>
           </div>
         )}
       </div>
@@ -279,16 +309,14 @@ export default function SubjectPage() {
             {subject.documents.length > 0 && (
               <ul className="space-y-2">
                 {subject.documents.map((d) => (
-                  <li key={d.id} className="flex items-center gap-3 text-sm">
+                  <li key={d.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
                     <FileText size={16} className="shrink-0 text-neutral-400" />
                     <span className="min-w-0 flex-1 truncate">{d.filename}</span>
                     <span className="text-neutral-500">
                       {d.kind} · {d.units} {d.filename.endsWith(".pptx") ? "slides" : "pages"}
                     </span>
-                    {d.warning && (
-                      <span title={d.warning}>
-                        <AlertTriangle size={15} className="text-amber-800" />
-                      </span>
+                    {!d.in_course && subject.topics.length > 0 && (
+                      <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-800">new</span>
                     )}
                     <button
                       className="text-neutral-400 hover:text-rose-700"
@@ -297,6 +325,7 @@ export default function SubjectPage() {
                     >
                       <Trash2 size={15} />
                     </button>
+                    {d.warning && <p className="w-full pl-7 text-xs text-amber-800">{d.warning}</p>}
                   </li>
                 ))}
               </ul>

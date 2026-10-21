@@ -1,6 +1,7 @@
 import { ArrowLeft, ArrowRight, Check, Layers, PenLine } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { AskButton, TutorChat } from "../components/TutorChat";
 import { ErrorNote, Markdown, Spinner, btnGhost, btnPrimary, card } from "../components/ui";
 import { api, type Topic } from "../lib/api";
 
@@ -9,9 +10,11 @@ export default function Lesson() {
   const navigate = useNavigate();
   const [topic, setTopic] = useState<Topic | null>(null);
   const [error, setError] = useState("");
+  const [chatOpen, setChatOpen] = useState(false);
 
   useEffect(() => {
     setTopic(null);
+    setChatOpen(false);
     api.topic(id).then(setTopic, (e) => setError(e.message));
     window.scrollTo(0, 0);
   }, [id]);
@@ -29,7 +32,12 @@ export default function Lesson() {
   };
 
   return (
-    <article className="mx-auto max-w-3xl space-y-8">
+    <article className="mx-auto max-w-3xl space-y-8 pb-16">
+      {chatOpen ? (
+        <TutorChat subjectId={topic.subject_id} topicId={topic.id} title={topic.title} onClose={() => setChatOpen(false)} />
+      ) : (
+        <AskButton onClick={() => setChatOpen(true)} />
+      )}
       <div>
         <Link to={`/s/${topic.subject_id}`} className="text-sm text-neutral-500 hover:underline">
           ← Course path

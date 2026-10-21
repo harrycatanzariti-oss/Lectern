@@ -7,7 +7,9 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(os.environ.get("LECTERN_DB", Path(__file__).resolve().parents[2] / "data" / "lectern.db"))
+DATA_DIR = Path(os.environ.get("LECTERN_DATA", Path(__file__).resolve().parents[2] / "data"))
+DB_PATH = Path(os.environ.get("LECTERN_DB", DATA_DIR / "lectern.db"))
+UPLOADS = DATA_DIR / "uploads"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS subjects (
@@ -28,6 +30,8 @@ CREATE TABLE IF NOT EXISTS documents (
     units INTEGER NOT NULL DEFAULT 0, -- pages or slides with text
     chars INTEGER NOT NULL DEFAULT 0,
     warning TEXT NOT NULL DEFAULT '',
+    image_pages TEXT NOT NULL DEFAULT '[]', -- pages with too little text; Claude reads them at build
+    in_course INTEGER NOT NULL DEFAULT 0,    -- set once a build has used this document
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS chunks (
@@ -84,6 +88,15 @@ CREATE TABLE IF NOT EXISTS attempts (
     feedback TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    topic_id INTEGER REFERENCES topics(id) ON DELETE CASCADE,  -- NULL = the subject-wide chat
+    role TEXT NOT NULL,               -- user | assistant
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS chat_thread ON chat_messages(subject_id, topic_id, id);
 CREATE INDEX IF NOT EXISTS chunks_subject ON chunks(subject_id, document_id, idx);
 CREATE INDEX IF NOT EXISTS cards_due ON cards(subject_id, due_at);
 CREATE INDEX IF NOT EXISTS attempts_topic ON attempts(topic_id);
@@ -126,7 +139,7 @@ def row(r: sqlite3.Row | None) -> dict | None:
     if r is None:
         return None
     d = dict(r)
-    for key in ("key_points", "sources", "options"):
+    for key in ("key_points", "sources", "options", "image_pages"):
         if key in d and isinstance(d[key], str):
             d[key] = json.loads(d[key])
     return d
