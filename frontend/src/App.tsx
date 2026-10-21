@@ -9,6 +9,7 @@ import Lesson from "./pages/Lesson";
 import Practice from "./pages/Practice";
 import Review from "./pages/Review";
 import SubjectPage from "./pages/SubjectPage";
+import SyllabusPage from "./pages/SyllabusPage";
 
 function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
   const [password, setPassword] = useState("");
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="/" element={<Home />} />
           <Route path="/review" element={<Review />} />
           <Route path="/s/:id" element={<SubjectPage />} />
+          <Route path="/s/:id/syllabus" element={<SyllabusPage />} />
           <Route path="/s/:id/review" element={<Review />} />
           <Route path="/s/:id/practice" element={<Practice />} />
           <Route path="/s/:id/exam" element={<Exam />} />

@@ -40,20 +40,23 @@ def _status(subject_id: int, status: str, message: str, progress: float | None =
             )
 
 
-def start(subject_id: int, tutor: Tutor, fresh: bool) -> bool:
+def start(subject_id: int, tutor: Tutor, fresh: bool, syllabus_only: bool = False) -> bool:
     """Run the build in the background. False if one is already running."""
     with _lock:
         if subject_id in _running:
             return False
         _running.add(subject_id)
     _status(subject_id, "building", "Reading your material", 0.01)
-    threading.Thread(target=_run, args=(subject_id, tutor, fresh), daemon=True).start()
+    threading.Thread(target=_run, args=(subject_id, tutor, fresh, syllabus_only), daemon=True).start()
     return True
 
 
-def _run(subject_id: int, tutor: Tutor, fresh: bool) -> None:
+def _run(subject_id: int, tutor: Tutor, fresh: bool, syllabus_only: bool = False) -> None:
     try:
-        build(subject_id, tutor, fresh)
+        if syllabus_only:
+            rebuild_syllabus(subject_id, tutor)
+        else:
+            build(subject_id, tutor, fresh)
     except AIError as e:
         _status(subject_id, "failed", str(e))
     except Exception:
@@ -181,13 +184,15 @@ def _fresh(subject: dict, material: str, labels: dict[int, str], tutor: Tutor, o
             for i, t in enumerate(outline)
         ]
 
+    note = _syllabus_step(subject, material, tutor, outline_files)
+
     # Syllabus items with no material are listed, not written: there's nothing to teach from.
     jobs = [
         (topic_ids[i], lambda i=i: tutor.topic(subject["name"], material, outline, i))
         for i, t in enumerate(outline) if _covered(t)
     ]
     gaps = len(outline) - len(jobs)
-    _write_all(subject_id, jobs, labels, total=len(jobs), done_message=_summary(len(jobs), gaps=gaps))
+    _write_all(subject_id, jobs, labels, total=len(jobs), done_message=_join(_summary(len(jobs), gaps=gaps), note))
 
 
 def _update(subject: dict, material: str, labels: dict[int, str], tutor: Tutor, outline_files: list[str]) -> None:
@@ -246,6 +251,8 @@ def _update(subject: dict, material: str, labels: dict[int, str], tutor: Tutor, 
                     conn.execute("UPDATE topics SET sources=? WHERE id=?",
                                  (json.dumps([labels[s] for s in t["sources"]]), t["id"]))
 
+    note = _syllabus_step(subject, material, tutor, outline_files) if new_files else None
+
     outline = [{"title": t["title"], "summary": t["summary"], "sources": t["sources"]} for t in course]
     jobs: list[tuple[int, Callable[[], dict]]] = []
     added = extended = filled = 0
@@ -269,7 +276,86 @@ def _update(subject: dict, material: str, labels: dict[int, str], tutor: Tutor, 
         gaps = conn.execute("SELECT COUNT(*) FROM topics WHERE subject_id=? AND status='missing'",
                             (subject_id,)).fetchone()[0] - filled
     _write_all(subject_id, jobs, labels, total=len(jobs),
-               done_message=_summary(len(jobs), added + filled, extended, gaps) or "Course is up to date")
+               done_message=_join(_summary(len(jobs), added + filled, extended, gaps) or "Course is up to date", note))
+
+
+def _join(message: str | None, note: str | None) -> str | None:
+    return ". ".join(m for m in (message, note) if m) or None
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def _syllabus_step(subject: dict, material: str, tutor: Tutor, outline_files: list[str]) -> str | None:
+    """Draft the syllabus. Returns a note for the status line if it couldn't be done;
+    the course is still worth building without it."""
+    _status(subject["id"], "building", "Mapping the syllabus", 0.04)
+    try:
+        write_syllabus(subject, material, tutor, outline_files)
+        return None
+    except Exception as e:
+        log.warning("syllabus for subject %s failed: %s", subject["id"], e)
+        return "The syllabus couldn't be drafted; try Rebuild syllabus"
+
+
+def write_syllabus(subject: dict, material: str, tutor: Tutor, outline_files: list[str]) -> None:
+    """Replace the subject's syllabus with a fresh draft, keeping the student's confidence
+    ratings on items that survive (matched by title)."""
+    subject_id = subject["id"]
+    with db.tx() as conn:
+        topics = db.rows(conn.execute(
+            "SELECT id, title, summary FROM topics WHERE subject_id=? ORDER BY position", (subject_id,)
+        ))
+        old = db.rows(conn.execute(
+            "SELECT s.title section, i.title item, i.confidence FROM syllabus_items i "
+            "JOIN syllabus_sections s ON s.id=i.section_id WHERE i.subject_id=? ORDER BY s.position, i.position",
+            (subject_id,),
+        ))
+    result = tutor.syllabus(subject["name"], material, outline_files, topics, old)
+    if not result["sections"]:
+        raise AIError("The AI returned an empty syllabus.")
+
+    topic_ids = {t["id"] for t in topics}
+    by_both = {(_norm(o["section"]), _norm(o["item"])): o["confidence"] for o in old}
+    by_item = {_norm(o["item"]): o["confidence"] for o in old}
+    names = [a["name"].strip() for a in result["assessments"]]
+    with db.tx() as conn:
+        conn.execute("DELETE FROM assessments WHERE subject_id=?", (subject_id,))
+        conn.execute("DELETE FROM syllabus_sections WHERE subject_id=?", (subject_id,))
+        for i, a in enumerate(result["assessments"]):
+            weight = a["weight"] if 0 <= a["weight"] <= 100 else None
+            conn.execute(
+                "INSERT INTO assessments (subject_id, position, name, weight, format, criteria) VALUES (?,?,?,?,?,?)",
+                (subject_id, i, names[i], weight, a["format"], a["criteria"]),
+            )
+        for i, sec in enumerate(result["sections"]):
+            sid = conn.execute(
+                "INSERT INTO syllabus_sections (subject_id, position, title, outcome) VALUES (?,?,?,?)",
+                (subject_id, i, sec["title"].strip(), sec["outcome"].strip()),
+            ).lastrowid
+            for j, it in enumerate(sec["items"]):
+                confidence = by_both.get((_norm(sec["title"]), _norm(it["title"])), by_item.get(_norm(it["title"]), 0))
+                conn.execute(
+                    "INSERT INTO syllabus_items (section_id, subject_id, position, title, detail, marking, importance, "
+                    "assessed_in, topic_ids, confidence) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (sid, subject_id, j, it["title"].strip(), it["detail"], it["marking"], it["importance"],
+                     json.dumps([n for n in (x.strip() for x in it["assessed_in"]) if n in names]),
+                     json.dumps([t for t in dict.fromkeys(it["topic_ids"]) if t in topic_ids]), confidence),
+                )
+
+
+def rebuild_syllabus(subject_id: int, tutor: Tutor) -> None:
+    """Redraft just the syllabus, e.g. after adding a course outline or for a course built
+    before syllabuses existed."""
+    subject, material, _labels = _load_material(subject_id)
+    with db.tx() as conn:
+        outline_files = [r[0] for r in conn.execute(
+            "SELECT filename FROM documents WHERE subject_id=? AND kind='outline' ORDER BY id", (subject_id,)
+        )]
+    _status(subject_id, "building", "Mapping the syllabus", 0.3)
+    write_syllabus(subject, material, tutor, outline_files)
+    _status(subject_id, "built", "Syllabus updated", 1)
 
 
 def _have(topic_id: int) -> dict[str, list[str]]:

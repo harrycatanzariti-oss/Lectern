@@ -94,6 +94,55 @@ export interface Topic extends TopicRow {
   next: { id: number; title: string } | null;
 }
 
+export interface Assessment {
+  id: number;
+  name: string;
+  weight: number | null;
+  format: string;
+  criteria: string;
+}
+
+/** 0 unrated, 1 not yet, 2 getting there, 3 confident */
+export type Confidence = 0 | 1 | 2 | 3;
+
+export interface SyllabusItem {
+  id: number;
+  position: number;
+  title: string;
+  detail: string;
+  marking: string;
+  importance: "high" | "medium" | "low";
+  assessed_in: string[];
+  confidence: Confidence;
+  /** Average mastery of the linked topics; null when no topic teaches it. */
+  mastery: number | null;
+  topics: { id: number; title: string; status: TopicRow["status"]; mastery: number }[];
+}
+
+export interface SyllabusProgress {
+  items: number;
+  mastery: number | null;
+  confident: number;
+  rated: number;
+  high: number;
+}
+
+export interface SyllabusSection {
+  id: number;
+  title: string;
+  outcome: string;
+  items: SyllabusItem[];
+  progress: SyllabusProgress;
+}
+
+export interface SyllabusData {
+  subject: { id: number; name: string; color: string; build_status: BuildStatus; build_message: string };
+  has_outline: boolean;
+  assessments: Assessment[];
+  sections: SyllabusSection[];
+  progress: SyllabusProgress;
+}
+
 export interface Card {
   id: number;
   front: string;
@@ -197,6 +246,10 @@ export const api = {
     req<{ questions: Question[] }>(`/subjects/${subjectId}/practice${topicId ? `?topic_id=${topicId}` : ""}`),
   answer: (questionId: number, answer: string) =>
     req<Marked>(`/questions/${questionId}/answer`, json("POST", { answer })),
+  syllabus: (subjectId: number) => req<SyllabusData>(`/subjects/${subjectId}/syllabus`),
+  rateItem: (itemId: number, confidence: Confidence) =>
+    req<{ confidence: Confidence }>(`/syllabus/items/${itemId}`, json("PATCH", { confidence })),
+  rebuildSyllabus: (subjectId: number) => req<{ ok: true }>(`/subjects/${subjectId}/syllabus`, { method: "POST" }),
   reviewAll: () => req<{ cards: Card[]; due: number; new: number }>("/review"),
   exam: (subjectId: number, n: number, topics: number[]) =>
     req<{ questions: Question[] }>(`/subjects/${subjectId}/exam?n=${n}&topics=${topics.join(",")}`),

@@ -155,13 +155,13 @@ function UnitCard({ unit, topics, numbers, color }: { unit: Unit; topics: TopicR
   );
 }
 
-/** The whole syllabus: units in course order, each with its topics and progress. */
-export function Syllabus({ subject }: { subject: Subject }) {
+/** The course path: units in course order, each with its topics and progress. */
+export function CoursePath({ subject }: { subject: Subject }) {
   const byId = new Map(subject.topics.map((t) => [t.id, t]));
   const numbers = new Map(subject.topics.map((t, i) => [t.id, i + 1]));
   return (
     <section className="space-y-3">
-      <h2 className="font-semibold">Syllabus</h2>
+      <h2 className="font-semibold">Course path</h2>
       {subject.units.map((u) => (
         <UnitCard
           key={u.title}

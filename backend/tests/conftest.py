@@ -90,6 +90,29 @@ class FakeTutor:
         yield "You asked: "
         yield message
 
+    def syllabus(self, subject, material, outline_files, topics, existing=()):
+        self.syllabus_args = {"outline_files": list(outline_files), "topics": topics, "existing": list(existing)}
+        ids = [t["id"] for t in topics]
+        return {
+            "assessments": [
+                {"name": "Final exam", "weight": 60, "format": "3-hour exam", "criteria": "Full working shown"},
+                {"name": "Quizzes", "weight": -1, "format": "weekly", "criteria": "Correct answers"},
+            ],
+            "sections": [
+                {"title": "Limits and continuity", "outcome": "Evaluate limits and test continuity", "items": [
+                    {"title": "The epsilon-delta definition of a limit", "detail": "State and use it",
+                     "marking": "Proofs need explicit delta", "importance": "high",
+                     "assessed_in": ["Final exam", "Made-up test"], "topic_ids": ids[:1] + [99999]},
+                    {"title": "Why continuity matters", "detail": "IVT", "marking": "Short answer",
+                     "importance": "low", "assessed_in": ["Quizzes"], "topic_ids": []},
+                ]},
+                {"title": "Differentiation", "outcome": "Differentiate functions", "items": [
+                    {"title": "The chain rule", "detail": "Compositions", "marking": "Method marks",
+                     "importance": "medium", "assessed_in": ["Final exam"], "topic_ids": ids[1:2]},
+                ]},
+            ],
+        }
+
     def mark(self, question, answer):
         ok = question["model_answer"].lower() in answer.lower()
         return {"score": 1.0 if ok else 0.25, "feedback": "Good." if ok else "Mention the slope."}

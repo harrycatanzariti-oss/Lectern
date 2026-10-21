@@ -678,6 +678,96 @@ def submit_exam(subject_id: int, body: ExamIn):
     }
 
 
+# ---------- syllabus ----------
+
+CONFIDENCE = {0: "unrated", 1: "not yet", 2: "getting there", 3: "confident"}
+
+
+def _avg(xs: list[float]) -> float | None:
+    return round(sum(xs) / len(xs), 3) if xs else None
+
+
+@app.get("/api/subjects/{subject_id}/syllabus")
+def get_syllabus(subject_id: int):
+    """What the student must know, by learning outcome, with how it's assessed and progress:
+    mastery from the linked topics' practice, plus the student's own confidence."""
+    with db.tx() as conn:
+        subject = _get(conn, "SELECT * FROM subjects WHERE id=?", subject_id)
+        assessments = db.rows(conn.execute(
+            "SELECT id, name, weight, format, criteria FROM assessments WHERE subject_id=? ORDER BY position",
+            (subject_id,),
+        ))
+        sections = db.rows(conn.execute(
+            "SELECT id, title, outcome FROM syllabus_sections WHERE subject_id=? ORDER BY position", (subject_id,)
+        ))
+        items = db.rows(conn.execute(
+            "SELECT * FROM syllabus_items WHERE subject_id=? ORDER BY position", (subject_id,)
+        ))
+        topics = {t["id"]: t for t in db.rows(conn.execute(
+            "SELECT id, title, status, unit FROM topics WHERE subject_id=?", (subject_id,)
+        ))}
+        mastery = topic_mastery(conn, list(topics))
+        has_outline = conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE subject_id=? AND kind='outline'", (subject_id,)
+        ).fetchone()[0] > 0
+
+    for it in items:
+        it["topics"] = [
+            {"id": t, "title": topics[t]["title"], "status": topics[t]["status"], "mastery": mastery[t]["mastery"]}
+            for t in it.pop("topic_ids") if t in topics
+        ]
+        # Topics not in the material yet count as 0: they're still to be learned.
+        it["mastery"] = _avg([t["mastery"] for t in it["topics"]])
+
+    def progress(its: list[dict]) -> dict:
+        return {
+            "items": len(its),
+            "mastery": _avg([i["mastery"] for i in its if i["mastery"] is not None]),
+            "confident": sum(1 for i in its if i["confidence"] == 3),
+            "rated": sum(1 for i in its if i["confidence"]),
+            "high": sum(1 for i in its if i["importance"] == "high"),
+        }
+
+    by_section: dict[int, list[dict]] = {}
+    for it in items:
+        by_section.setdefault(it.pop("section_id"), []).append(it)
+        del it["subject_id"]
+    for sec in sections:
+        sec["items"] = by_section.get(sec["id"], [])
+    return {
+        "subject": {"id": subject["id"], "name": subject["name"], "color": subject["color"],
+                    "build_status": subject["build_status"], "build_message": subject["build_message"]},
+        "has_outline": has_outline,
+        "assessments": assessments,
+        "sections": [{**sec, "progress": progress(sec["items"])} for sec in sections],
+        "progress": progress(items),
+    }
+
+
+class ConfidenceIn(BaseModel):
+    confidence: int = Field(ge=0, le=3)
+
+
+@app.patch("/api/syllabus/items/{item_id}")
+def rate_item(item_id: int, body: ConfidenceIn):
+    with db.tx() as conn:
+        _get(conn, "SELECT id FROM syllabus_items WHERE id=?", item_id)
+        conn.execute("UPDATE syllabus_items SET confidence=? WHERE id=?", (body.confidence, item_id))
+    return {"confidence": body.confidence}
+
+
+@app.post("/api/subjects/{subject_id}/syllabus", status_code=202)
+def rebuild_syllabus(subject_id: int):
+    """Redraft just the syllabus (e.g. after uploading the course outline)."""
+    with db.tx() as conn:
+        _get(conn, "SELECT id FROM subjects WHERE id=?", subject_id)
+        if not conn.execute("SELECT COUNT(*) FROM chunks WHERE subject_id=?", (subject_id,)).fetchone()[0]:
+            raise HTTPException(422, "Upload some material first.")
+    if not builder.start(subject_id, tutor(), fresh=False, syllabus_only=True):
+        raise HTTPException(409, "This subject is busy building. Try again when it's done.")
+    return {"ok": True}
+
+
 # ---------- export for a Claude Project ----------
 
 def _slug(name: str) -> str:
@@ -751,6 +841,24 @@ def export(subject_id: int, material: bool = False):
         for m in misses:
             out.append(f"- [{m['topic']}] {m['prompt']}\n  - Their answer: {m['answer'] or '(blank)'} "
                        f"({round(m['score'] * 100)}%). {m['feedback']}")
+
+    syl = get_syllabus(subject_id)
+    if syl["sections"]:
+        out += ["", "## Syllabus: what they need to know", ""]
+        if syl["assessments"]:
+            out += ["**Assessments**", ""]
+            for a in syl["assessments"]:
+                weight = f" ({a['weight']:g}%)" if a["weight"] is not None else ""
+                out.append(f"- {a['name']}{weight}: {a['format']}. Marked on: {a['criteria']}")
+            out.append("")
+        for sec in syl["sections"]:
+            out += [f"### {sec['title']}", "", f"*Outcome: {sec['outcome']}*", ""]
+            for it in sec["items"]:
+                tags = [it["importance"] + " importance", f"their confidence: {CONFIDENCE[it['confidence']]}"]
+                if it["assessed_in"]:
+                    tags.append("assessed in " + ", ".join(it["assessed_in"]))
+                out.append(f"- **{it['title']}** ({'; '.join(tags)}). {it['detail']} Marking: {it['marking']}")
+            out.append("")
 
     out += ["", "## Course", ""]
     for t in topics:

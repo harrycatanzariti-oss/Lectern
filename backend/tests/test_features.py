@@ -211,6 +211,8 @@ def test_export_for_claude_project(client):
     assert "### 1. Limits" in md and "- Q: Limits Q0?\n  A: A0" in md
     assert "*Answer:* C. c" in md
     assert "## Source material" not in md
+    assert "## Syllabus: what they need to know" in md and "- Final exam (60%): 3-hour exam." in md
+    assert "**The chain rule** (medium importance; their confidence: unrated; assessed in Final exam)" in md
 
     full = client.get(f"/api/subjects/{sid}/export?material=true")
     assert "with-material" in full.headers["content-disposition"]
@@ -292,3 +294,69 @@ def test_old_topics_without_units_get_one_on_update(client):
     builder.build(sid, client.fake, fresh=False)
     units = [u["title"] for u in client.get(f"/api/subjects/{sid}").json()["units"]]
     assert units == ["renamed unit?", "Unit 3: Integration"]
+
+
+def test_syllabus_is_built_with_the_course(client):
+    sid = make_subject(client)
+    upload(client, sid)
+    outline_upload(client, sid)
+    build(client, sid)
+    assert client.fake.syllabus_args["outline_files"] == ["syllabus.md"]
+    ids = [t["id"] for t in topics(client, sid)]
+
+    syl = client.get(f"/api/subjects/{sid}/syllabus").json()
+    assert syl["has_outline"] is True
+    assert [(a["name"], a["weight"]) for a in syl["assessments"]] == [("Final exam", 60), ("Quizzes", None)]
+    assert [s["title"] for s in syl["sections"]] == ["Limits and continuity", "Differentiation"]
+    first = syl["sections"][0]["items"][0]
+    assert first["title"] == "The epsilon-delta definition of a limit"
+    assert first["assessed_in"] == ["Final exam"]  # unknown assessment names dropped
+    assert [t["id"] for t in first["topics"]] == [ids[0]]  # unknown topic ids dropped
+    assert first["mastery"] == 0.0 and first["confidence"] == 0
+    assert syl["sections"][0]["items"][1]["mastery"] is None  # no linked topic
+    assert syl["progress"] == {"items": 3, "mastery": 0.0, "confident": 0, "rated": 0, "high": 1}
+
+
+def test_confidence_is_kept_when_the_syllabus_is_redrafted(client):
+    sid = make_subject(client)
+    upload(client, sid)
+    build(client, sid)
+    item = client.get(f"/api/subjects/{sid}/syllabus").json()["sections"][1]["items"][0]
+    assert client.patch(f"/api/syllabus/items/{item['id']}", json={"confidence": 3}).status_code == 200
+    assert client.patch(f"/api/syllabus/items/{item['id']}", json={"confidence": 7}).status_code == 422
+
+    upload(client, sid, "More.")
+    builder.build(sid, client.fake, fresh=False)  # an update redrafts the syllabus
+    assert client.fake.syllabus_args["existing"][2] == {"section": "Differentiation", "item": "The chain rule",
+                                                       "confidence": 3}
+    syl = client.get(f"/api/subjects/{sid}/syllabus").json()
+    assert syl["sections"][1]["items"][0]["confidence"] == 3
+    assert syl["progress"]["confident"] == 1 and syl["progress"]["rated"] == 1
+
+
+def test_rebuild_syllabus_on_its_own(client, monkeypatch):
+    sid = make_subject(client)
+    upload(client, sid)
+    build(client, sid)
+    started = []
+    monkeypatch.setattr(builder, "start", lambda s, t, fresh, syllabus_only=False: started.append(syllabus_only) or True)
+    assert client.post(f"/api/subjects/{sid}/syllabus").status_code == 202 and started == [True]
+
+    builder.rebuild_syllabus(sid, client.fake)
+    s = client.get(f"/api/subjects/{sid}").json()
+    assert (s["build_status"], s["build_message"]) == ("built", "Syllabus updated")
+    assert len(topics(client, sid)) == 2  # the course itself is untouched
+
+
+def test_failed_syllabus_doesnt_fail_the_build(client):
+    from lectern.ai import AIError
+
+    def broken(*a, **k):
+        raise AIError("nope")
+    client.fake.syllabus = broken
+    sid = make_subject(client)
+    upload(client, sid)
+    build(client, sid)
+    s = client.get(f"/api/subjects/{sid}").json()
+    assert s["build_status"] == "built" and "Rebuild syllabus" in s["build_message"]
+    assert client.get(f"/api/subjects/{sid}/syllabus").json()["sections"] == []

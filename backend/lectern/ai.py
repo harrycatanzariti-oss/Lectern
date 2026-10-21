@@ -134,6 +134,27 @@ TRANSCRIBE_SCHEMA = _obj(
     )),
 )
 
+SYLLABUS_SCHEMA = _obj(
+    assessments=_arr(_obj(
+        name=STR,
+        weight={"type": "number", "description": "Percent of the final mark; -1 if unknown"},
+        format={"type": "string", "description": "e.g. '2-hour closed-book exam', 'weekly online quiz'"},
+        criteria={"type": "string", "description": "What markers reward and penalise, from the rubric if there is one"},
+    )),
+    sections=_arr(_obj(
+        title={"type": "string", "description": "Short header for one course learning outcome or area"},
+        outcome={"type": "string", "description": "The learning outcome, as the course states it where possible"},
+        items=_arr(_obj(
+            title={"type": "string", "description": "One thing to know or understand, phrased as knowledge"},
+            detail={"type": "string", "description": "What exactly to know, and to what depth"},
+            marking={"type": "string", "description": "How it's examined and what earns the marks"},
+            importance={"type": "string", "enum": ["high", "medium", "low"]},
+            assessed_in=_arr(STR, "Names of the assessments that test it"),
+            topic_ids=_arr(INT, "ids of the course topics that teach it"),
+        )),
+    )),
+)
+
 MARK_SCHEMA = _obj(
     score={"type": "number", "description": "0 to 1"},
     feedback=STR,
@@ -326,6 +347,56 @@ class Tutor:
                 + self._syllabus_rules(list(outline_files))
             )),
             schema=UPDATE_SCHEMA,
+        )
+
+    def syllabus(
+        self, subject: str, material: str, outline_files: list[str], topics: list[dict], existing: list[dict] = (),
+    ) -> dict[str, Any]:
+        """Everything the student has to know, organised by learning outcome and weighted by
+        how it's assessed. topics: [{id, title, summary}] of the course, to link items to."""
+        course = "\n".join(f"[topic {t['id']}] {t['title']}: {t['summary']}" for t in topics)
+        if outline_files:
+            basis = (
+                f"Base it on the official course outline ({', '.join(outline_files)}): take the sections "
+                "from its learning outcomes (keeping their wording in outcome), the assessments from its "
+                "assessment details, and the marking emphasis from any rubric, marking criteria, exam "
+                "format or past-paper notes. Use the other material to spell out what each outcome "
+                "actually requires."
+            )
+        else:
+            basis = (
+                "There's no official course outline, so infer the learning outcomes from the material, "
+                "and the assessments and marking from anything it says about exams, assignments, "
+                "weightings or what lecturers stress. Where nothing is said, use one assessment named "
+                "\"Final exam\" with weight -1."
+            )
+        keep = ""
+        if existing:
+            keep = (
+                "\n\nThe student already has this syllabus and has rated their confidence on it. Keep "
+                "these section and item titles word for word where they still apply, so their ratings "
+                "carry over; add, split or drop items only where the material calls for it:\n"
+                + "\n".join(f"- {e['section']} → {e['item']}" for e in existing)
+            )
+        return self._call(
+            prompt=self._with_material(material, (
+                f"Subject: {subject}\n\nThe course built from this material has these topics:\n{course}\n\n"
+                "Write the syllabus: a map of everything the student must know to do well in this "
+                f"course, organised for revising. {basis}\n\n"
+                "- sections: one per learning outcome (or coherent area), in course order, 3–10 of them.\n"
+                "- items: under each section, the specific knowledge it requires, 2–12 each. Phrase every "
+                "item as something to know or understand: a concept, definition, result, method or "
+                "argument (e.g. \"The ε–δ definition of a limit\", \"How to choose a substitution in "
+                "integration\", \"Why the mean value theorem needs continuity\"). Never phrase an item as "
+                "a study task like \"read chapter 3\" or \"complete the quiz\".\n"
+                "- importance: high for what carries the most marks or is assessed repeatedly, low for "
+                "background that's rarely examined.\n"
+                "- marking: how this item is examined and what earns or loses marks.\n"
+                "- topic_ids: the course topics above that teach it (empty if none do)."
+                + keep
+            )),
+            schema=SYLLABUS_SCHEMA,
+            max_tokens=32000,
         )
 
     def extend_topic(

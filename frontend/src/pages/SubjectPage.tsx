@@ -1,7 +1,8 @@
-import { AlertTriangle, ArrowRight, ClipboardList, Download, FileText, Layers, MessageCircle, PenLine, RefreshCw, Trash2, Upload } from "lucide-react";
+import { AlertTriangle, ArrowRight, Download, FileText, RefreshCw, Trash2, Upload } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
-import { StatTiles, Syllabus } from "../components/Syllabus";
+import { useNavigate, useParams } from "react-router-dom";
+import { CoursePath, StatTiles } from "../components/CoursePath";
+import { SubjectHeader } from "../components/SubjectHeader";
 import { TutorChat } from "../components/TutorChat";
 import { Bar, ErrorNote, Spinner, btnGhost, btnPrimary, card } from "../components/ui";
 import { api, type Subject } from "../lib/api";
@@ -208,34 +209,14 @@ export default function SubjectPage() {
   return (
     <div className="space-y-8">
       {chatOpen && <TutorChat subjectId={id} title={subject.name} onClose={() => setChatOpen(false)} />}
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <Link to="/" className="text-sm text-neutral-500 hover:underline">
-            ← Subjects
-          </Link>
-          <h1 className="mt-1 flex items-center gap-3 text-2xl font-bold">
-            <span className="h-4 w-4 rounded-full" style={{ background: subject.color }} />
-            {subject.name}
-          </h1>
-
-        </div>
-        {hasCourse && (
-          <div className="flex flex-wrap gap-2">
-            <Link to={`/s/${id}/review`} className={btnGhost}>
-              <Layers size={15} /> Flashcards{subject.due ? ` (${subject.due} due)` : ""}
-            </Link>
-            <Link to={`/s/${id}/practice`} className={btnGhost}>
-              <PenLine size={15} /> Practice
-            </Link>
-            <Link to={`/s/${id}/exam`} className={btnGhost}>
-              <ClipboardList size={15} /> Mock exam
-            </Link>
-            <button onClick={() => setChatOpen(true)} className={btnGhost}>
-              <MessageCircle size={15} /> Ask the tutor
-            </button>
-          </div>
-        )}
-      </div>
+      <SubjectHeader
+        id={id}
+        name={subject.name}
+        color={subject.color}
+        due={subject.due}
+        hasCourse={hasCourse}
+        onAsk={() => setChatOpen(true)}
+      />
 
       {hasCourse && <StatTiles subject={subject} />}
 
@@ -255,7 +236,7 @@ export default function SubjectPage() {
         </div>
       )}
 
-      {subject.topics.length > 0 && <Syllabus subject={subject} />}
+      {subject.topics.length > 0 && <CoursePath subject={subject} />}
 
       <section className={`${card} space-y-5 p-5`}>
         <div className="flex items-center justify-between">

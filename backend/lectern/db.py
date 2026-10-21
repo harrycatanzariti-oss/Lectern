@@ -97,6 +97,38 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     content TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- The syllabus: what the student has to know, organised by the course's learning
+-- outcomes and how it's assessed. Rebuilt by the AI; confidence is the student's own.
+CREATE TABLE IF NOT EXISTS assessments (
+    id INTEGER PRIMARY KEY,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    weight REAL,                      -- percent of the final mark, if known
+    format TEXT NOT NULL DEFAULT '',  -- e.g. "2-hour closed-book exam"
+    criteria TEXT NOT NULL DEFAULT '' -- what markers look for
+);
+CREATE TABLE IF NOT EXISTS syllabus_sections (
+    id INTEGER PRIMARY KEY,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    outcome TEXT NOT NULL DEFAULT ''  -- the learning outcome this header stands for
+);
+CREATE TABLE IF NOT EXISTS syllabus_items (
+    id INTEGER PRIMARY KEY,
+    section_id INTEGER NOT NULL REFERENCES syllabus_sections(id) ON DELETE CASCADE,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',     -- what exactly to know, and to what depth
+    marking TEXT NOT NULL DEFAULT '',    -- how it's marked / what earns the marks
+    importance TEXT NOT NULL DEFAULT 'medium',  -- high | medium | low, by marks at stake
+    assessed_in TEXT NOT NULL DEFAULT '[]',     -- assessment names
+    topic_ids TEXT NOT NULL DEFAULT '[]',       -- course topics that teach it
+    confidence INTEGER NOT NULL DEFAULT 0       -- the student's own: 0 unrated, 1 not yet, 2 getting there, 3 confident
+);
+CREATE INDEX IF NOT EXISTS syllabus_items_subject ON syllabus_items(subject_id, section_id, position);
 CREATE INDEX IF NOT EXISTS chat_thread ON chat_messages(subject_id, topic_id, id);
 CREATE INDEX IF NOT EXISTS chunks_subject ON chunks(subject_id, document_id, idx);
 CREATE INDEX IF NOT EXISTS cards_due ON cards(subject_id, due_at);
@@ -157,7 +189,7 @@ def row(r: sqlite3.Row | None) -> dict | None:
     if r is None:
         return None
     d = dict(r)
-    for key in ("key_points", "sources", "options", "image_pages"):
+    for key in ("key_points", "sources", "options", "image_pages", "assessed_in", "topic_ids"):
         if key in d and isinstance(d[key], str):
             d[key] = json.loads(d[key])
     return d

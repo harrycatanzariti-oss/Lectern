@@ -12,15 +12,18 @@ export function TutorChat({
   subjectId,
   topicId,
   title,
+  starter = "",
   onClose,
 }: {
   subjectId: number;
   topicId?: number;
   title: string;
+  /** Text to start the message box with, e.g. a question about a syllabus item. */
+  starter?: string;
   onClose: () => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[] | null>(null);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(starter);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const scroller = useRef<HTMLDivElement>(null);

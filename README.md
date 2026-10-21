@@ -63,7 +63,7 @@ Each subject opens on a dashboard:
 - **Stat tiles:** overall progress, topics mastered, cards due today, and how much of the
   syllabus your files cover.
 - **Up next:** the one thing to do now.
-- **Syllabus:** units in course order. Each unit has a progress bar, and each topic in it
+- **Course path:** units in course order. Each unit has a progress bar, and each topic in it
   has its own bar plus lesson / flashcards / practice status.
 
 Upload your unit outline or official syllabus as a **Course outline** file, and the units
@@ -71,6 +71,26 @@ follow it. Anything it lists that your other files don't teach appears as a grey
 topic marked *Not in your material yet*. Gaps count as 0% in the progress bars, because
 they're still things you need to know. Add material that covers a gap and **Update
 course** fills it in.
+
+### The syllabus
+
+Each subject has a **Syllabus** tab, separate from the dashboard. It's a map of everything
+you need to *know* (not things to do), organised for revision:
+
+- **Headers:** the course's learning outcomes.
+- **Sub-headers:** the specific concepts, results and methods each outcome requires.
+- **Opening an item** shows what depth you need, how it's marked, which assessments test
+  it, the lessons that teach it (with your mastery), and your own confidence rating:
+  *Not yet / Getting there / Confident*.
+- **Assessments across the top:** each with its weighting and marking criteria. Tap one
+  to see only what it tests. You can also filter to high-weight items or ones you're not
+  confident in yet.
+
+It's drafted at build time, and redrafted on each update. Your ratings carry over wherever
+an item is unchanged. With a **Course outline** uploaded, the syllabus follows the
+official learning outcomes, assessment details and marking criteria. Without one it's
+inferred from your material, and the page says so. **Rebuild syllabus** redrafts just the
+syllabus, e.g. after you upload the outline.
 
 ### Adding material later
 
